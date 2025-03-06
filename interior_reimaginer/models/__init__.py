@@ -13,12 +13,12 @@ __all__ = [
 ]
 
 # ui/__init__.py
-from .gradio_interface import create_advanced_ui
+from ui.gradio_interface import create_advanced_ui
 
 __all__ = ['create_advanced_ui']
 
 # utils/__init__.py
-from .helpers import (
+from utils.helpers import (
     setup_logging,
     get_device,
     print_system_info,
