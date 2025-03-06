@@ -128,6 +128,13 @@ The application includes several predefined interior design styles:
 
 This project is provided for educational and research purposes only.
 
+## Authors
+
+This project was developed by École Polytechnique students:
+
+- **Emiliano Pizana Vela** - [emiliano.pizana-vela@polytechnique.edu](mailto:emiliano.pizana-vela@polytechnique.edu)
+- **Alfonso Mateos Vicente** - [alfonso.mateos-vicente@polytechnique.edu](mailto:alfonso.mateos-vicente@polytechnique.edu)
+
 ## Acknowledgments
 
 - [Stability AI](https://stability.ai/) for Stable Diffusion models
