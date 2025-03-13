@@ -547,9 +547,20 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
                 logger.error(f"Error saving 3D model: {e}")
                 return None, f"Error saving 3D model: {str(e)}"
         
+        # Connect the save button to the save function, preserving the state from the generation
+        recon_generate_btn.click(
+            generate_3d_visualization,
+            inputs=[recon_input_image, downsample_factor, recon_options, auto_fallback],
+            outputs=[recon_output, recon_status, gr.State()]  # Use gr.State() to create a stateful output
+        ).then(
+            lambda x, y, z: z,  # Pass the state through
+            inputs=[recon_output, recon_status, gr.State()],
+            outputs=[gr.State()]  # Store in stateful component
+        )
+        
         recon_save_btn.click(
             save_3d_model,
-            inputs=[gr.State(None)],
+            inputs=[gr.State()],  # Use the stored state
             outputs=[recon_download, recon_status]
         )
 

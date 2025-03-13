@@ -496,11 +496,26 @@ class DepthReconstructor:
         logger.info("Creating enhanced 3D reconstruction...")
         
         try:
+            # Debug information about the input depth map
+            logger.info(f"Depth map shape: {depth_map.shape}, range: [{depth_map.min()}, {depth_map.max()}]")
+            
+            # Ensure the depth map is valid
+            if depth_map.max() <= 0:
+                logger.warning("Invalid depth map (all zeros or negative)")
+                # Return a fallback colored depth map
+                return self.render_depth_map(depth_map, width=width, height=height), o3d.geometry.PointCloud()
+            
+            # Convert to float for gradient calculation
+            depth_float = depth_map.astype(np.float32)
+            
             # Calculate depth confidence using gradient analysis
             # Areas with high gradient (edges) are less reliable
-            depth_gradx = cv2.Sobel(depth_map, cv2.CV_32F, 1, 0, ksize=3)
-            depth_grady = cv2.Sobel(depth_map, cv2.CV_32F, 0, 1, ksize=3)
+            depth_gradx = cv2.Sobel(depth_float, cv2.CV_32F, 1, 0, ksize=3)
+            depth_grady = cv2.Sobel(depth_float, cv2.CV_32F, 0, 1, ksize=3)
             depth_grad_mag = np.sqrt(depth_gradx**2 + depth_grady**2)
+            
+            # Debug gradient info
+            logger.info(f"Gradient magnitude range: [{depth_grad_mag.min()}, {depth_grad_mag.max()}]")
             
             # Normalize gradient magnitude
             if depth_grad_mag.max() > 0:
@@ -508,12 +523,26 @@ class DepthReconstructor:
             else:
                 confidence = np.ones_like(depth_map)
             
-            # Apply confidence threshold
-            confidence_mask = confidence > 0.7  # Only keep points with high confidence
+            # Lower the confidence threshold to keep more points while still filtering noise
+            confidence_threshold = 0.5  # More forgiving threshold (previously 0.7)
+            confidence_mask = confidence > confidence_threshold
+            
+            # Count points before and after confidence filtering
+            total_points = depth_map.size
+            confident_points = np.sum(confidence_mask)
+            logger.info(f"Confidence filtering: kept {confident_points}/{total_points} points ({confident_points/total_points*100:.1f}%)")
             
             # Apply confidence mask to depth map
             filtered_depth = depth_map.copy()
             filtered_depth[~confidence_mask] = 0
+            
+            # Verify filtered depth map has non-zero values
+            if np.count_nonzero(filtered_depth) == 0:
+                logger.warning("Filtered depth map is empty, using original depth map")
+                filtered_depth = depth_map  # Fallback to original
+            
+            # Create an enhanced colored depth map visualization 
+            enhanced_depth_viz = self.render_depth_map(filtered_depth, width=width, height=height)
             
             # Create a higher quality point cloud with confidence filtering
             pcd = self.depth_to_pointcloud(
@@ -522,26 +551,29 @@ class DepthReconstructor:
                 downsample_factor=downsample_factor
             )
             
-            # Render the enhanced point cloud using Open3D
-            try:
-                # Try Open3D rendering first
-                render_img = self.render_pointcloud_image(pcd, width=width, height=height, zoom=0.7)
+            # Check if point cloud generation succeeded
+            if pcd is None or len(pcd.points) == 0:
+                logger.warning("Failed to generate point cloud, falling back to colored depth map")
+                return enhanced_depth_viz, o3d.geometry.PointCloud()
                 
-                # Check if valid (not too dark)
-                if render_img.mean() < 0.1:
-                    raise Exception("Open3D rendering too dark")
-                    
-            except Exception as e:
-                logger.warning(f"Enhanced 3D Open3D visualization failed: {str(e)}")
+            logger.info(f"Generated point cloud with {len(pcd.points)} points")
                 
-                # Fall back to Matplotlib rendering
-                render_img = self.render_pointcloud_matplotlib(
-                    depth_map=filtered_depth, 
-                    image=image,
-                    width=width,
-                    height=height,
-                    downsample_factor=max(1, downsample_factor)
-                )
+            # For debugging, try to visualize the point cloud using Matplotlib first
+            # This is more reliable than Open3D visualization
+            render_img = self.render_pointcloud_matplotlib(
+                depth_map=filtered_depth, 
+                image=image,
+                width=width,
+                height=height,
+                downsample_factor=max(1, downsample_factor)
+            )
+            
+            # Check if the rendered image is valid (not too bright)
+            mean_value = render_img.mean()
+            logger.info(f"Rendered image mean value: {mean_value}")
+            if mean_value > 0.95:  # Almost white
+                logger.warning("Matplotlib rendering too bright, falling back to colored depth map")
+                return enhanced_depth_viz, pcd
                 
             return render_img, pcd
             
