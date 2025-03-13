@@ -296,31 +296,78 @@ class DepthReconstructor:
     
     def is_headless_environment(self) -> bool:
         """
-        Check if we're running in a headless environment without X server
+        Comprehensive check for headless environment and rendering capabilities
         
         Returns:
-            True if headless, False otherwise
+            True if headless or if visualization can't be initialized, False otherwise
         """
-        # Check for DISPLAY environment variable
+        # Check for DISPLAY environment variable (X11)
         display = os.environ.get('DISPLAY', '')
         if not display:
+            logger.info("No DISPLAY environment variable found - headless environment")
+            return True
+        
+        # Check for Wayland display
+        wayland_display = os.environ.get('WAYLAND_DISPLAY', '')
+        if not wayland_display and not display:
+            logger.info("No X11 or Wayland display found - headless environment")
             return True
             
-        # Also check for common headless flags
+        # Check for SSH connection without X forwarding
         if 'SSH_CONNECTION' in os.environ and not os.environ.get('XAUTHORITY'):
+            logger.info("SSH connection without X forwarding detected")
             return True
-            
-        return False
+        
+        # Try to verify GPU/OpenGL availability by attempting to create a test plotter
+        try:
+            logger.info("Testing PyVista initialization...")
+            test_plotter = pv.Plotter(off_screen=True, window_size=(10, 10))
+            test_plotter.close()
+            logger.info("PyVista initialized successfully - display available")
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to initialize PyVista: {str(e)}")
+            return True
     
-    def render_pointcloud_pyvista(self, depth_map: np.ndarray, image: Image.Image,
-                                width: int = 800, height: int = 600,
+    def setup_virtual_framebuffer(self) -> bool:
+        """
+        Attempt to set up a virtual framebuffer for headless rendering
+        
+        Returns:
+            True if successfully set up, False otherwise
+        """
+        try:
+            # Try to initialize xvfb through PyVista
+            pv.start_xvfb()
+            logger.info("Started virtual framebuffer (xvfb) for PyVista rendering")
+            return True
+        except Exception as e:
+            logger.warning(f"Could not start virtual framebuffer: {str(e)}")
+            
+            # Additional diagnostic information
+            logger.info("To enable PyVista in headless environments:")
+            logger.info("1. Install xvfb: 'apt-get install xvfb'")
+            logger.info("2. Run with: 'xvfb-run -a python your_script.py'")
+            logger.info("   or set: 'export DISPLAY=:99.0 && Xvfb :99 -screen 0 1024x768x24 &'")
+            
+            return False
+    
+    def render_pointcloud_pyvista(self, 
+                                point_cloud: Optional[o3d.geometry.PointCloud] = None,
+                                depth_map: Optional[np.ndarray] = None, 
+                                image: Optional[Image.Image] = None,
+                                width: int = 800, 
+                                height: int = 600,
                                 downsample_factor: int = 3) -> np.ndarray:
         """
-        Render a 3D point cloud using PyVista (VTK-based) for high-quality rendering.
+        Enhanced PyVista-based point cloud renderer with extensive options and fallbacks.
+        
+        Can render either a provided point cloud or generate one from depth map & image.
         
         Args:
-            depth_map: Depth map as numpy array
-            image: Original color image
+            point_cloud: Optional Open3D point cloud to render (takes precedence if provided)
+            depth_map: Depth map as numpy array (used if point_cloud not provided)
+            image: Original color image (used if point_cloud not provided)
             width: Desired output width
             height: Desired output height
             downsample_factor: Factor by which to downsample the point cloud
@@ -330,99 +377,181 @@ class DepthReconstructor:
         """
         logger.info(f"Rendering point cloud with PyVista (downsample={downsample_factor})")
         
-        # Check if we're in a headless environment
+        # Check if we're in a headless environment and try to set up virtual framebuffer
         if self.is_headless_environment():
-            logger.warning("Headless environment detected, PyVista requires X server. Falling back to Plotly.")
-            return self.render_pointcloud_plotly(depth_map, image, width, height, downsample_factor)
+            if not self.setup_virtual_framebuffer():
+                logger.warning("Headless environment detected without virtual framebuffer. Falling back to Plotly.")
+                if point_cloud is not None:
+                    return self.render_pointcloud_image(point_cloud, width, height)
+                else:
+                    return self.render_pointcloud_plotly(depth_map, image, width, height, downsample_factor)
         
         try:
-            # Try to initialize xvfb if PyVista suggests it
-            try:
-                pv.start_xvfb()
-                logger.info("Started virtual framebuffer (xvfb) for PyVista rendering")
-            except Exception as e:
-                logger.warning(f"Could not start virtual framebuffer: {str(e)}")
-                
-            # Create a PyVista plotter with the proper size
+            # Configure advanced rendering settings
+            pv.rcParams['use_ipyvtk'] = False  # Ensure we're not using iPython/Jupyter rendering
+            
+            # Create a PyVista plotter with the proper size and settings
             plotter = pv.Plotter(off_screen=True, window_size=(width, height))
             
-            # Normalize depth map
-            if depth_map.max() <= 255:
-                depth_norm = depth_map.astype(np.float32) / 255.0
+            # Process differently based on whether we got a point cloud or depth/image
+            if point_cloud is not None and len(point_cloud.points) > 0:
+                # Use the provided point cloud
+                logger.info(f"Rendering provided point cloud with {len(point_cloud.points)} points")
+                
+                # Convert Open3D point cloud to numpy arrays
+                points = np.asarray(point_cloud.points)
+                colors = np.asarray(point_cloud.colors)
+                
+                # Create PyVista point cloud
+                pv_cloud = pv.PolyData(points)
+                
+                # Add colors if available
+                if colors.shape[0] == points.shape[0]:
+                    pv_cloud['rgb'] = colors
+                    add_with_rgb = True
+                else:
+                    add_with_rgb = False
+                
             else:
-                depth_norm = depth_map.astype(np.float32) / 1000.0
-
-            # Get color image as RGB numpy array
-            color_img = np.array(image.convert('RGB'))
+                # Generate point cloud from depth map and image
+                if depth_map is None or image is None:
+                    raise ValueError("Either point_cloud or both depth_map and image must be provided")
+                
+                # Normalize depth map
+                if depth_map.max() <= 255:
+                    depth_norm = depth_map.astype(np.float32) / 255.0
+                else:
+                    depth_norm = depth_map.astype(np.float32) / 1000.0
+    
+                # Get color image as RGB numpy array
+                color_img = np.array(image.convert('RGB'))
+                
+                # Ensure dimensions match
+                if color_img.shape[:2] != depth_map.shape[:2]:
+                    color_img = cv2.resize(color_img, (depth_map.shape[1], depth_map.shape[0]))
+                
+                # Downsample for better performance
+                h, w = depth_norm.shape
+                y_indices, x_indices = np.mgrid[0:h:downsample_factor, 0:w:downsample_factor]
+                
+                # Get 3D coordinates
+                z = depth_norm[y_indices, x_indices]
+                x = x_indices
+                y = y_indices
+                colors = color_img[y_indices, x_indices] / 255.0
+                
+                # Flatten arrays
+                x = x.flatten()
+                y = y.flatten()
+                z = z.flatten()
+                rgb = colors.reshape(-1, 3)
+                
+                # Filter out invalid points
+                valid = (z > 0)
+                x = x[valid]
+                y = y[valid]
+                z = z[valid]
+                rgb = rgb[valid]
+                
+                # Normalize spatial coordinates
+                x = (x - w/2) / w
+                y = -(y - h/2) / h  # Invert Y axis
+                
+                # Create point cloud data array with proper orientation
+                points = np.column_stack((x, z, -y))  # Use -y for correct orientation
+                
+                # Create PyVista point cloud
+                pv_cloud = pv.PolyData(points)
+                
+                # Add RGB colors to the point cloud
+                pv_cloud['rgb'] = rgb
+                add_with_rgb = True
             
-            # Ensure dimensions match
-            if color_img.shape[:2] != depth_map.shape[:2]:
-                color_img = cv2.resize(color_img, (depth_map.shape[1], depth_map.shape[0]))
+            # Add the point cloud to the plotter with proper settings
+            if add_with_rgb:
+                plotter.add_points(
+                    pv_cloud, 
+                    render_points_as_spheres=True, 
+                    point_size=5,  # Slightly larger for better visibility
+                    rgb=True,      # Use the RGB colors we added
+                    ambient=0.2,   # Add some ambient light
+                    diffuse=0.8,   # Add diffuse lighting for better depth perception
+                    specular=0.1   # Add a slight specular highlight
+                )
+            else:
+                plotter.add_points(
+                    pv_cloud, 
+                    render_points_as_spheres=True,
+                    point_size=5,
+                    color='tan'  # Default color if no colors are available
+                )
             
-            # Downsample for better performance
-            h, w = depth_norm.shape
-            y_indices, x_indices = np.mgrid[0:h:downsample_factor, 0:w:downsample_factor]
-            
-            # Get 3D coordinates
-            z = depth_norm[y_indices, x_indices]
-            x = x_indices
-            y = y_indices
-            colors = color_img[y_indices, x_indices] / 255.0
-            
-            # Flatten arrays
-            x = x.flatten()
-            y = y.flatten()
-            z = z.flatten()
-            rgb = colors.reshape(-1, 3)
-            
-            # Filter out invalid points
-            valid = (z > 0)
-            x = x[valid]
-            y = y[valid]
-            z = z[valid]
-            rgb = rgb[valid]
-            
-            # Normalize spatial coordinates
-            x = (x - w/2) / w
-            y = -(y - h/2) / h  # Invert Y axis
-            
-            # Create point cloud data array
-            points = np.column_stack((x, z, -y))  # Use -y for correct orientation
-            
-            # Create PyVista point cloud
-            point_cloud = pv.PolyData(points)
-            
-            # Add RGB colors to the point cloud
-            point_cloud['rgb'] = rgb
-            
-            # Add to the plotter with a good point size
-            plotter.add_points(point_cloud, render_points_as_spheres=True, point_size=4, rgb=True)
-            
-            # Set up a nice camera view
-            plotter.view_isometric()
+            # Configure optimal camera and lighting for 3D visualization
             plotter.set_background([0.9, 0.9, 0.9])  # Light gray background
             
-            # Add better lighting
-            plotter.add_light(pv.Light(position=(1, 1, 1)))
-            plotter.add_light(pv.Light(position=(-1, -1, -1), color='blue'))
+            # Add enhanced lighting setup
+            plotter.add_light(pv.Light(position=(1, 1, 1), intensity=0.7))
+            plotter.add_light(pv.Light(position=(-1, -1, -1), color='blue', intensity=0.3))
+            plotter.add_light(pv.Light(position=(0, 0, 1), color='white', intensity=0.3))
+            
+            # Set up a nice camera view
+            plotter.camera_position = 'iso'  # Isometric view
+            plotter.camera.zoom(1.2)  # Zoom in slightly to focus on the model
+            
+            # Add orientation axes for context
+            plotter.add_axes(interactive=False, line_width=2)
+            
+            # Ensure proper rendering quality
+            plotter.renderer.SetSamples(8)  # Anti-aliasing for smoother edges
             
             # Render to image
             plotter.show(auto_close=False)
             img = plotter.screenshot(return_img=True)
             plotter.close()
             
+            # Check if the result is valid (not all white or black)
+            if img.mean() < 0.05 or img.mean() > 0.95:
+                logger.warning(f"PyVista rendering produced invalid image (too bright/dark): {img.mean()}")
+                raise ValueError("Invalid rendering output")
+            
             # Convert to float32 and normalize
             return img.astype(np.float32) / 255.0
             
         except Exception as e:
             logger.warning(f"Error rendering with PyVista: {str(e)}")
-            # Try Plotly next
+            
+            # Try Plotly next (better than Matplotlib for 3D)
             try:
-                return self.render_pointcloud_plotly(depth_map, image, width, height, downsample_factor)
+                logger.info("Falling back to Plotly 3D renderer")
+                if point_cloud is not None:
+                    # For point cloud input, convert to Open3D rendering first
+                    # then use direct rendering for the point cloud
+                    return self.render_pointcloud_image(point_cloud, width, height, zoom=0.8)
+                else:
+                    return self.render_pointcloud_plotly(depth_map, image, width, height, downsample_factor)
             except Exception as e2:
                 logger.warning(f"Error with Plotly fallback: {str(e2)}")
-                # Fall back to Matplotlib rendering
-                return self.render_pointcloud_matplotlib(depth_map, image, width, height, downsample_factor)
+                
+                # Fall back to Matplotlib rendering as last resort
+                logger.info("Falling back to Matplotlib renderer (final fallback)")
+                if point_cloud is not None:
+                    # We need to first get a depth map for Matplotlib
+                    depths = np.asarray([p[2] for p in point_cloud.points])
+                    if len(depths) > 0:
+                        min_depth = min(depths)
+                        max_depth = max(depths)
+                        # Create a simple depth map
+                        synthetic_depth = np.ones((height, width)) * min_depth
+                        # Just render a colored depth map as last resort
+                        return self.render_depth_map(
+                            np.asarray(point_cloud.points)[:, 2].reshape(-1, 1), 
+                            width=width, 
+                            height=height
+                        )
+                    else:
+                        return np.ones((height, width, 3), dtype=np.float32) * 0.8  # Light gray
+                else:
+                    return self.render_pointcloud_matplotlib(depth_map, image, width, height, downsample_factor)
     
     def depth_to_pointcloud(self, 
                            depth_map: np.ndarray, 
@@ -820,31 +949,71 @@ class DepthReconstructor:
                 ("Matplotlib", lambda: self.render_pointcloud_matplotlib(filtered_depth, image, width, height, downsample_factor))
             ]
             
-            # Try each rendering method in order until one succeeds
-            for method_name, render_func in render_methods:
-                try:
-                    logger.info(f"Attempting 3D rendering with {method_name}")
-                    render_img = render_func()
-                    
-                    # Validate the rendered image
-                    mean_value = render_img.mean()
-                    logger.info(f"{method_name} rendering result: mean value = {mean_value}")
-                    
-                    # Check if the image is too bright or too dark
-                    if mean_value < 0.1 or mean_value > 0.95:
-                        logger.warning(f"{method_name} rendering produced invalid image (too bright/dark)")
-                        continue
-                    
-                    logger.info(f"Successfully rendered with {method_name}")
-                    break  # Stop if we got a good render
-                    
-                except Exception as e:
-                    logger.warning(f"{method_name} rendering failed: {str(e)}")
-            
-            # If all rendering methods failed, use the color depth map
-            if render_img is None or render_img.mean() < 0.1 or render_img.mean() > 0.95:
-                logger.warning("All 3D rendering methods failed, using colored depth map")
-                return enhanced_depth_viz, pcd
+            # First try to render directly with the point cloud using the enhanced PyVista renderer
+            try:
+                # Try to use PyVista's improved point cloud rendering directly with the point cloud
+                logger.info("Attempting PyVista rendering with direct point cloud")
+                render_img = self.render_pointcloud_pyvista(
+                    point_cloud=pcd,  # Pass the point cloud directly
+                    width=width,
+                    height=height
+                )
+                logger.info("Successfully rendered with PyVista direct point cloud")
+                return render_img, pcd
+            except Exception as pv_err:
+                logger.warning(f"PyVista direct point cloud rendering failed: {str(pv_err)}")
+                
+                # Fall back to the tiered approach if direct rendering fails
+                render_img = None
+                render_methods = [
+                    ("PyVista", lambda: self.render_pointcloud_pyvista(
+                        depth_map=filtered_depth, 
+                        image=image, 
+                        width=width, 
+                        height=height, 
+                        downsample_factor=downsample_factor
+                    )),
+                    ("Plotly", lambda: self.render_pointcloud_plotly(
+                        filtered_depth, 
+                        image, 
+                        width=width, 
+                        height=height, 
+                        downsample_factor=downsample_factor
+                    )), 
+                    ("Matplotlib", lambda: self.render_pointcloud_matplotlib(
+                        filtered_depth, 
+                        image, 
+                        width=width, 
+                        height=height, 
+                        downsample_factor=downsample_factor
+                    ))
+                ]
+                
+                # Try each rendering method in order until one succeeds
+                for method_name, render_func in render_methods:
+                    try:
+                        logger.info(f"Attempting 3D rendering with {method_name}")
+                        render_img = render_func()
+                        
+                        # Validate the rendered image
+                        mean_value = render_img.mean()
+                        logger.info(f"{method_name} rendering result: mean value = {mean_value}")
+                        
+                        # Check if the image is too bright or too dark
+                        if mean_value < 0.1 or mean_value > 0.95:
+                            logger.warning(f"{method_name} rendering produced invalid image (too bright/dark)")
+                            continue
+                        
+                        logger.info(f"Successfully rendered with {method_name}")
+                        break  # Stop if we got a good render
+                        
+                    except Exception as e:
+                        logger.warning(f"{method_name} rendering failed: {str(e)}")
+                
+                # If all rendering methods failed, use the color depth map
+                if render_img is None or render_img.mean() < 0.1 or render_img.mean() > 0.95:
+                    logger.warning("All 3D rendering methods failed, using colored depth map")
+                    return enhanced_depth_viz, pcd
                 
             return render_img, pcd
             
@@ -1046,50 +1215,63 @@ class DepthReconstructor:
             
             logger.info(f"Final point cloud has {len(combined_pcd.points)} points")
             
-            # Render the point cloud
-            # First try PyVista (best quality)
+            # Try to render directly with the generated point cloud using the enhanced PyVista renderer
             try:
-                # Check if we're in a headless environment
-                if not self.is_headless_environment():
-                    logger.info("Rendering with PyVista")
-                    render_img = self.render_pointcloud_pyvista(
-                        depth_map,  # Original depth map for coordinates
-                        image,      # Original image for colors
-                        width=width,
-                        height=height,
-                        downsample_factor=max(1, downsample_factor)
-                    )
-                else:
-                    # Fall back to Plotly in headless environments
-                    raise RuntimeError("Headless environment, skipping PyVista")
-            except Exception as e:
-                logger.warning(f"PyVista rendering failed: {str(e)}")
+                # Try to use PyVista's improved point cloud rendering directly with our combined point cloud
+                logger.info("Attempting PyVista rendering with direct LRM point cloud")
+                render_img = self.render_pointcloud_pyvista(
+                    point_cloud=combined_pcd,  # Pass the combined point cloud directly
+                    width=width,
+                    height=height
+                )
+                logger.info("Successfully rendered LRM result with PyVista direct point cloud")
+                return render_img, combined_pcd
+            except Exception as pv_err:
+                logger.warning(f"PyVista direct LRM point cloud rendering failed: {str(pv_err)}")
+                
+                # Fall back to the tiered approach if direct rendering fails
                 try:
-                    # Try Plotly next
-                    logger.info("Rendering with Plotly")
-                    render_img = self.render_pointcloud_plotly(
-                        depth_map,
-                        image,
-                        width=width,
-                        height=height,
-                        downsample_factor=max(1, downsample_factor)
-                    )
-                except Exception as e2:
-                    logger.warning(f"Plotly rendering failed: {str(e2)}")
-                    # Fall back to Matplotlib as last resort
-                    render_img = self.render_pointcloud_matplotlib(
-                        depth_map,
-                        image,
-                        width=width,
-                        height=height,
-                        downsample_factor=max(1, downsample_factor)
-                    )
-            
-            # Validate the rendered image
-            mean_value = render_img.mean()
-            if mean_value < 0.1 or mean_value > 0.95:
-                logger.warning(f"LRM rendering produced invalid image (too bright/dark)")
-                return enhanced_depth_viz, combined_pcd
+                    # Check if we're in a headless environment
+                    if not self.is_headless_environment():
+                        logger.info("Rendering with PyVista from depth map")
+                        render_img = self.render_pointcloud_pyvista(
+                            depth_map=depth_map,
+                            image=image,
+                            width=width,
+                            height=height,
+                            downsample_factor=max(1, downsample_factor)
+                        )
+                    else:
+                        # Fall back to Plotly in headless environments
+                        raise RuntimeError("Headless environment, skipping PyVista")
+                except Exception as e:
+                    logger.warning(f"PyVista rendering failed: {str(e)}")
+                    try:
+                        # Try Plotly next
+                        logger.info("Rendering with Plotly")
+                        render_img = self.render_pointcloud_plotly(
+                            depth_map,
+                            image,
+                            width=width,
+                            height=height,
+                            downsample_factor=max(1, downsample_factor)
+                        )
+                    except Exception as e2:
+                        logger.warning(f"Plotly rendering failed: {str(e2)}")
+                        # Fall back to Matplotlib as last resort
+                        render_img = self.render_pointcloud_matplotlib(
+                            depth_map,
+                            image,
+                            width=width,
+                            height=height,
+                            downsample_factor=max(1, downsample_factor)
+                        )
+                
+                # Validate the rendered image
+                mean_value = render_img.mean()
+                if mean_value < 0.1 or mean_value > 0.95:
+                    logger.warning(f"LRM rendering produced invalid image (too bright/dark)")
+                    return enhanced_depth_viz, combined_pcd
             
             return render_img, combined_pcd
             
