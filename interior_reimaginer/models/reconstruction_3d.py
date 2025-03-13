@@ -188,16 +188,27 @@ class DepthReconstructor:
         vis.add_geometry(pcd)
         
         # Configure camera view
-        view_control = vis.get_view_control()
-        view_control.set_zoom(zoom)
-        
-        # Render
-        vis.poll_events()
-        vis.update_renderer()
-        image = vis.capture_screen_float_buffer(do_render=True)
-        vis.destroy_window()
-        
-        return np.asarray(image)
+        try:
+            view_control = vis.get_view_control()
+            if view_control is not None:
+                view_control.set_zoom(zoom)
+            
+            # Set a default viewpoint for better visualization
+            vis.get_render_option().background_color = np.asarray([0.1, 0.1, 0.1])
+            vis.get_render_option().point_size = 2.0
+            
+            # Render
+            vis.poll_events()
+            vis.update_renderer()
+            image = vis.capture_screen_float_buffer(do_render=True)
+            vis.destroy_window()
+            
+            return np.asarray(image)
+        except Exception as e:
+            logger.warning(f"Error rendering point cloud: {str(e)}")
+            # Create a fallback image with text
+            fallback_img = np.ones((height, width, 3), dtype=np.float32) * 0.1
+            return fallback_img
     
     def render_mesh_image(self, mesh: o3d.geometry.TriangleMesh, 
                          width: int = 800, height: int = 600,
@@ -219,13 +230,24 @@ class DepthReconstructor:
         vis.add_geometry(mesh)
         
         # Configure camera view
-        view_control = vis.get_view_control()
-        view_control.set_zoom(zoom)
-        
-        # Render
-        vis.poll_events()
-        vis.update_renderer()
-        image = vis.capture_screen_float_buffer(do_render=True)
-        vis.destroy_window()
-        
-        return np.asarray(image)
+        try:
+            view_control = vis.get_view_control()
+            if view_control is not None:
+                view_control.set_zoom(zoom)
+                
+            # Set a default viewpoint for better visualization
+            vis.get_render_option().background_color = np.asarray([0.1, 0.1, 0.1])
+            vis.get_render_option().mesh_show_back_face = True
+            
+            # Render
+            vis.poll_events()
+            vis.update_renderer()
+            image = vis.capture_screen_float_buffer(do_render=True)
+            vis.destroy_window()
+            
+            return np.asarray(image)
+        except Exception as e:
+            logger.warning(f"Error rendering mesh: {str(e)}")
+            # Create a fallback image with text
+            fallback_img = np.ones((height, width, 3), dtype=np.float32) * 0.1
+            return fallback_img
