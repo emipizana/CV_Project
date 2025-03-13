@@ -5,65 +5,12 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 from mpl_toolkits.mplot3d import Axes3D
 import plotly.graph_objects as go
-# Previously used trimesh and pyrender for rendering, now using VisPy exclusively
 from PIL import Image
 import cv2
 import logging
 import io
 import base64
 from typing import List, Dict, Tuple, Optional, Union, Any, Literal, Callable
-
-# Import VisPy for improved point cloud rendering
-import vispy
-from vispy import scene, app, io as vio
-from vispy.scene import visuals, transforms
-import threading
-import time
-import sys
-from contextlib import contextmanager
-
-# Context manager for suppressing stdout and stderr
-@contextmanager
-def suppress_stdout_stderr():
-    """
-    Context manager to suppress standard output and standard error.
-    Useful for suppressing VisPy/Qt warnings in headless environments.
-    """
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
-    null_file = open(os.devnull, 'w')
-    try:
-        sys.stdout = null_file
-        sys.stderr = null_file
-        yield
-    finally:
-        sys.stdout = original_stdout
-        sys.stderr = original_stderr
-        null_file.close()
-
-# Event class for communication between threads
-class RenderEvent:
-    """Helper class for synchronizing the rendering thread and main thread."""
-    def __init__(self):
-        self.is_done = False
-        self.image = None
-        self.lock = threading.Lock()
-        
-    def set_done(self, image):
-        """Mark rendering as complete and store the rendered image."""
-        with self.lock:
-            self.image = image
-            self.is_done = True
-            
-    def is_rendering_done(self):
-        """Check if rendering is complete."""
-        with self.lock:
-            return self.is_done
-            
-    def get_image(self):
-        """Get the rendered image if available."""
-        with self.lock:
-            return self.image
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +28,7 @@ class DepthReconstructor:
             "depth_map": "Colored Depth Map (2D)",
             "pointcloud_mpl": "Matplotlib Point Cloud (3D)",
             "enhanced_3d": "Enhanced 3D Reconstruction",
-            "lrm_3d": "LRM 3D Reconstruction",
-            "vispy_3d": "VisPy 3D Visualization (High Performance)"
+            "lrm_3d": "LRM 3D Reconstruction"
         }
     
     def render_depth_map(self, depth_map: np.ndarray, colormap: int = cv2.COLORMAP_INFERNO,
@@ -375,7 +321,7 @@ class DepthReconstructor:
         
         return False
     
-    # Removed Trimesh renderer in favor of VisPy
+    # We'll use Plotly as our primary 3D visualization method
     
     def depth_to_pointcloud(self, 
                            depth_map: np.ndarray, 
@@ -600,205 +546,6 @@ class DepthReconstructor:
             fallback_img = np.ones((height, width, 3), dtype=np.float32) * 0.8  # Light gray
             return fallback_img
     
-    def render_pointcloud_vispy(self,
-                               point_cloud: Optional[o3d.geometry.PointCloud] = None,
-                               depth_map: Optional[np.ndarray] = None,
-                               image: Optional[Image.Image] = None,
-                               width: int = 800,
-                               height: int = 600,
-                               downsample_factor: int = 3) -> np.ndarray:
-        """
-        VisPy-based point cloud renderer that works in headless environments.
-        Can achieve better performance than Trimesh while being more reliable.
-        
-        Can render either a provided point cloud or generate one from depth map & image.
-        
-        Args:
-            point_cloud: Optional Open3D point cloud to render (takes precedence if provided)
-            depth_map: Depth map as numpy array (used if point_cloud not provided)
-            image: Original color image (used if point_cloud not provided)
-            width: Desired output width
-            height: Desired output height
-            downsample_factor: Factor by which to downsample the point cloud
-            
-        Returns:
-            Rendered point cloud as numpy array
-        """
-        logger.info(f"Rendering point cloud with VisPy (downsample={downsample_factor})")
-        
-        try:
-            # Check if we're in a headless environment
-            is_headless = self.is_headless_environment()
-            if is_headless:
-                logger.info("Detected headless environment, using VisPy with OSMesa")
-                # Make VisPy use OSMesa backend for offscreen rendering
-                with suppress_stdout_stderr():
-                    app.use_app('pyqt5')  # Force to use PyQt for consistency
-            
-            # Process differently based on whether we got a point cloud or depth/image
-            if point_cloud is not None and len(point_cloud.points) > 0:
-                # Use the provided point cloud
-                logger.info(f"Rendering provided point cloud with {len(point_cloud.points)} points")
-                
-                # Extract points and colors from Open3D point cloud
-                points = np.asarray(point_cloud.points)
-                if len(point_cloud.colors) > 0:
-                    colors = np.asarray(point_cloud.colors)
-                else:
-                    # Default coloring if no colors provided
-                    colors = np.ones((len(points), 3), dtype=np.float32) * 0.7
-                
-            else:
-                # Generate point cloud from depth map and image
-                if depth_map is None or image is None:
-                    raise ValueError("Either point_cloud or both depth_map and image must be provided")
-                
-                # Normalize depth map
-                if depth_map.max() <= 255:
-                    depth_norm = depth_map.astype(np.float32) / 255.0
-                else:
-                    depth_norm = depth_map.astype(np.float32) / 1000.0
-    
-                # Get color image as RGB numpy array
-                color_img = np.array(image.convert('RGB'))
-                
-                # Ensure dimensions match
-                if color_img.shape[:2] != depth_map.shape[:2]:
-                    color_img = cv2.resize(color_img, (depth_map.shape[1], depth_map.shape[0]))
-                
-                # Downsample for better performance
-                h, w = depth_norm.shape
-                y_indices, x_indices = np.mgrid[0:h:downsample_factor, 0:w:downsample_factor]
-                
-                # Get 3D coordinates
-                z = depth_norm[y_indices, x_indices]
-                x = x_indices
-                y = y_indices
-                colors = color_img[y_indices, x_indices] / 255.0  # Normalize colors to 0-1
-                
-                # Flatten arrays
-                x = x.flatten()
-                y = y.flatten()
-                z = z.flatten()
-                colors = colors.reshape(-1, 3)
-                
-                # Filter out invalid points
-                valid = (z > 0)
-                x = x[valid]
-                y = y[valid]
-                z = z[valid]
-                colors = colors[valid]
-                
-                # Normalize spatial coordinates
-                x = (x - w/2) / w
-                y = -(y - h/2) / h  # Invert Y axis
-                
-                # Create point cloud data array with proper orientation (x, z, -y)
-                points = np.column_stack((x, z, -y))
-            
-            # Check if we have enough points to render
-            if len(points) == 0:
-                logger.warning("No valid points to render, returning fallback image")
-                fallback_img = np.ones((height, width, 3), dtype=np.float32) * 0.8  # Light gray
-                return fallback_img
-                
-            # Set up multithreaded rendering event
-            render_event = RenderEvent()
-            
-            # This will be called from a background thread to handle the rendering
-            def render_thread_func():
-                try:
-                    # Create a new canvas
-                    canvas = scene.SceneCanvas(keys='interactive', show=False,
-                                            size=(width, height), bgcolor='white')
-                    
-                    # Create a view box
-                    view = canvas.central_widget.add_view()
-                    view.camera = 'turntable'  # Use turntable camera for easy rotation
-                    view.camera.fov = 45
-                    view.camera.distance = 2
-                    view.camera.elevation = 30
-                    view.camera.azimuth = 45
-                    
-                    # Create scatter visual
-                    scatter = visuals.Markers()
-                    scatter.set_data(points, edge_color=None, face_color=colors, size=5)
-                    view.add(scatter)
-                    
-                    # Add axis for reference
-                    axis = visuals.XYZAxis(parent=view.scene)
-                    
-                    # Update the view to include the whole point cloud
-                    view.camera.set_range()
-                    
-                    # For headless rendering, we must render directly
-                    img = canvas.render(size=(width, height))
-                    
-                    # Convert to float32 and normalize
-                    img_normalized = img.astype(np.float32) / 255.0
-                    
-                    # Set the image in the event
-                    render_event.set_done(img_normalized)
-                    
-                except Exception as e:
-                    logger.warning(f"Error in VisPy rendering thread: {str(e)}")
-                    # Create a fallback image with a light background
-                    fallback_img = np.ones((height, width, 3), dtype=np.float32) * 0.8
-                    render_event.set_done(fallback_img)
-            
-            # Create and start the rendering thread
-            render_thread = threading.Thread(target=render_thread_func)
-            render_thread.daemon = True
-            render_thread.start()
-            
-            # Wait for the rendering to complete with a timeout
-            start_time = time.time()
-            timeout = 10  # seconds
-            while not render_event.is_rendering_done():
-                if time.time() - start_time > timeout:
-                    logger.warning("VisPy rendering timed out")
-                    break
-                time.sleep(0.1)
-            
-            # Get the rendered image if available
-            if render_event.is_rendering_done():
-                img = render_event.get_image()
-                if img is not None:
-                    return img
-            
-            # If we reach here, rendering failed or timed out
-            logger.warning("VisPy rendering failed, falling back to Plotly")
-            if point_cloud is not None:
-                # For point cloud input, convert to Open3D rendering
-                return self.render_pointcloud_image(point_cloud, width, height, zoom=0.8)
-            else:
-                return self.render_pointcloud_plotly(depth_map, image, width, height, downsample_factor)
-                
-        except Exception as e:
-            logger.warning(f"Error rendering with VisPy: {str(e)}")
-            
-            # Try Plotly next (better than Matplotlib for 3D)
-            try:
-                logger.info("Falling back to Plotly 3D renderer")
-                if point_cloud is not None:
-                    # For point cloud input, convert to Open3D rendering
-                    return self.render_pointcloud_image(point_cloud, width, height, zoom=0.8)
-                else:
-                    return self.render_pointcloud_plotly(depth_map, image, width, height, downsample_factor)
-            except Exception as e2:
-                logger.warning(f"Error with Plotly fallback: {str(e2)}")
-                
-                # Fall back to Matplotlib rendering as last resort
-                logger.info("Falling back to Matplotlib renderer (final fallback)")
-                if point_cloud is not None:
-                    # We need to create a synthetic depth map
-                    return self.render_depth_map(
-                        np.asarray(point_cloud.points)[:, 2].reshape(-1, 1), 
-                        width=width, 
-                        height=height
-                    )
-                else:
-                    return self.render_pointcloud_matplotlib(depth_map, image, width, height, downsample_factor)
     
     def render_mesh_image(self, mesh: o3d.geometry.TriangleMesh, 
                          width: int = 800, height: int = 600,
@@ -965,73 +712,44 @@ class DepthReconstructor:
                 
             logger.info(f"Generated point cloud with {len(pcd.points)} points")
             
-            # Use a cascading set of rendering approaches, from most advanced to most reliable
+            # Use Plotly as the primary 3D visualization method
             render_img = None
-            render_methods = [
-                ("Plotly", lambda: self.render_pointcloud_plotly(filtered_depth, image, width, height, downsample_factor)), 
-                ("Matplotlib", lambda: self.render_pointcloud_matplotlib(filtered_depth, image, width, height, downsample_factor))
-            ]
-            
-            # First try to render directly with the point cloud using the VisPy renderer
+                
+            # Attempt to render with Plotly
             try:
-                # Try to use VisPy's point cloud rendering directly with the point cloud
-                logger.info("Attempting VisPy rendering with direct point cloud")
-                render_img = self.render_pointcloud_vispy(
-                    point_cloud=pcd,  # Pass the point cloud directly
-                    width=width,
-                    height=height
+                logger.info("Attempting 3D rendering with Plotly")
+                render_img = self.render_pointcloud_plotly(
+                    filtered_depth, 
+                    image, 
+                    width=width, 
+                    height=height, 
+                    downsample_factor=downsample_factor
                 )
-                logger.info("Successfully rendered with VisPy direct point cloud")
-                return render_img, pcd
-            except Exception as vispy_err:
-                logger.warning(f"VisPy direct point cloud rendering failed: {str(vispy_err)}")
                 
-                # Fall back to the tiered approach if direct rendering fails
-                render_img = None
-                render_methods = [
-                    ("VisPy", lambda: self.render_pointcloud_vispy(
-                        depth_map=filtered_depth, 
-                        image=image, 
-                        width=width, 
-                        height=height, 
-                        downsample_factor=downsample_factor
-                    )),
-                    ("Plotly", lambda: self.render_pointcloud_plotly(
+                # Validate the rendered image
+                mean_value = render_img.mean()
+                if mean_value < 0.1 or mean_value > 0.95:
+                    logger.warning("Plotly rendering produced invalid image (too bright/dark)")
+                    raise ValueError("Invalid image output")
+                
+                logger.info("Successfully rendered with Plotly")
+            except Exception as e:
+                logger.warning(f"Plotly rendering failed: {str(e)}")
+                
+                # Fall back to Matplotlib
+                try:
+                    logger.info("Falling back to Matplotlib renderer")
+                    render_img = self.render_pointcloud_matplotlib(
                         filtered_depth, 
                         image, 
                         width=width, 
                         height=height, 
                         downsample_factor=downsample_factor
-                    )), 
-                    ("Matplotlib", lambda: self.render_pointcloud_matplotlib(
-                        filtered_depth, 
-                        image, 
-                        width=width, 
-                        height=height, 
-                        downsample_factor=downsample_factor
-                    ))
-                ]
-                
-                # Try each rendering method in order until one succeeds
-                for method_name, render_func in render_methods:
-                    try:
-                        logger.info(f"Attempting 3D rendering with {method_name}")
-                        render_img = render_func()
-                        
-                        # Validate the rendered image
-                        mean_value = render_img.mean()
-                        logger.info(f"{method_name} rendering result: mean value = {mean_value}")
-                        
-                        # Check if the image is too bright or too dark
-                        if mean_value < 0.1 or mean_value > 0.95:
-                            logger.warning(f"{method_name} rendering produced invalid image (too bright/dark)")
-                            continue
-                        
-                        logger.info(f"Successfully rendered with {method_name}")
-                        break  # Stop if we got a good render
-                        
-                    except Exception as e:
-                        logger.warning(f"{method_name} rendering failed: {str(e)}")
+                    )
+                    logger.info("Successfully rendered with Matplotlib")
+                except Exception as e2:
+                    logger.warning(f"Matplotlib rendering failed: {str(e2)}")
+                    render_img = enhanced_depth_viz  # Use depth map as last resort
                 
                 # If all rendering methods failed, use the color depth map
                 if render_img is None or render_img.mean() < 0.1 or render_img.mean() > 0.95:
@@ -1238,52 +956,34 @@ class DepthReconstructor:
             
             logger.info(f"Final point cloud has {len(combined_pcd.points)} points")
             
-            # Try to render directly with the generated point cloud using the VisPy renderer
+            # Try to render with Plotly first
             try:
-                # Try to use VisPy's point cloud rendering with the combined point cloud
-                logger.info("Attempting VisPy rendering with direct LRM point cloud")
-                render_img = self.render_pointcloud_vispy(
-                    point_cloud=combined_pcd,  # Pass the combined point cloud directly
+                logger.info("Attempting Plotly rendering for LRM reconstruction")
+                render_img = self.render_pointcloud_plotly(
+                    depth_map,
+                    image,
                     width=width,
-                    height=height
+                    height=height,
+                    downsample_factor=max(1, downsample_factor)
                 )
-                logger.info("Successfully rendered LRM result with VisPy direct point cloud")
-                return render_img, combined_pcd
-            except Exception as vispy_err:
-                logger.warning(f"VisPy direct LRM point cloud rendering failed: {str(vispy_err)}")
+                logger.info("Successfully rendered LRM result with Plotly")
+            except Exception as e:
+                logger.warning(f"Plotly rendering failed: {str(e)}")
                 
-                # Fall back to the tiered approach if direct rendering fails
+                # Fall back to Matplotlib as last resort
                 try:
-                    logger.info("Rendering with VisPy from depth map")
-                    render_img = self.render_pointcloud_vispy(
-                        depth_map=depth_map,
-                        image=image,
+                    logger.info("Falling back to Matplotlib for LRM reconstruction")
+                    render_img = self.render_pointcloud_matplotlib(
+                        depth_map,
+                        image,
                         width=width,
                         height=height,
                         downsample_factor=max(1, downsample_factor)
                     )
-                except Exception as e:
-                    logger.warning(f"VisPy rendering failed: {str(e)}")
-                    try:
-                        # Try Plotly next
-                        logger.info("Rendering with Plotly")
-                        render_img = self.render_pointcloud_plotly(
-                            depth_map,
-                            image,
-                            width=width,
-                            height=height,
-                            downsample_factor=max(1, downsample_factor)
-                        )
-                    except Exception as e2:
-                        logger.warning(f"Plotly rendering failed: {str(e2)}")
-                        # Fall back to Matplotlib as last resort
-                        render_img = self.render_pointcloud_matplotlib(
-                            depth_map,
-                            image,
-                            width=width,
-                            height=height,
-                            downsample_factor=max(1, downsample_factor)
-                        )
+                    logger.info("Successfully rendered with Matplotlib fallback")
+                except Exception as e2:
+                    logger.warning(f"Matplotlib rendering also failed: {str(e2)}")
+                    render_img = enhanced_depth_viz  # Use depth map visualization as last resort
                 
                 # Validate the rendered image
                 mean_value = render_img.mean()
@@ -1369,22 +1069,9 @@ class DepthReconstructor:
                 return self.render_pointcloud_matplotlib(depth_map, image, 
                                                       width=width, height=height)
                                                       
-            elif method == "vispy_3d":
-                # VisPy point cloud visualization (high performance)
-                try:
-                    return self.render_pointcloud_vispy(
-                        depth_map=depth_map,
-                        image=image,
-                        width=width,
-                        height=height
-                    )
-                except Exception as e:
-                    logger.warning(f"VisPy rendering failed: {str(e)}")
-                    # Fall back to Plotly for better quality than Matplotlib
-                    return self.render_pointcloud_plotly(depth_map, image, width=width, height=height)
                 
             elif method == "enhanced_3d":
-                # Try to use the enhanced 3D reconstruction 
+                # Try to use the enhanced 3D reconstruction with Plotly
                 try:
                     render_img, _ = self.enhanced_reconstruction(
                         depth_map=depth_map,
@@ -1393,18 +1080,19 @@ class DepthReconstructor:
                         height=height
                     )
                     return render_img
-                except RuntimeError as cuda_err:
-                    # Handle CUDA-specific errors by falling back to CPU methods
-                    if "CUDA" in str(cuda_err):
-                        logger.warning(f"CUDA error in enhanced reconstruction: {str(cuda_err)}")
-                        logger.info("Falling back to matplotlib visualization (CPU-based)")
+                except Exception as e:
+                    logger.warning(f"Enhanced reconstruction failed: {str(e)}")
+                    # Fall back to direct Plotly rendering
+                    try:
+                        logger.info("Falling back to direct Plotly rendering")
+                        return self.render_pointcloud_plotly(depth_map, image, width=width, height=height)
+                    except Exception as e2:
+                        logger.warning(f"Plotly fallback failed: {str(e2)}")
+                        # Finally fall back to Matplotlib
                         return self.render_pointcloud_matplotlib(depth_map, image, width=width, height=height)
-                    else:
-                        # Re-raise non-CUDA runtime errors
-                        raise
                         
             elif method == "lrm_3d":
-                # Try to use the LRM 3D reconstruction
+                # Try to use the LRM 3D reconstruction with Plotly
                 try:
                     render_img, _ = self.lrm_reconstruction(
                         depth_map=depth_map,
@@ -1416,15 +1104,16 @@ class DepthReconstructor:
                         overlap=8
                     )
                     return render_img
-                except RuntimeError as cuda_err:
-                    # Handle CUDA-specific errors by falling back to CPU methods
-                    if "CUDA" in str(cuda_err):
-                        logger.warning(f"CUDA error in LRM reconstruction: {str(cuda_err)}")
-                        logger.info("Falling back to matplotlib visualization (CPU-based)")
+                except Exception as e:
+                    logger.warning(f"LRM reconstruction failed: {str(e)}")
+                    # Fall back to direct Plotly rendering
+                    try:
+                        logger.info("Falling back to direct Plotly rendering")
+                        return self.render_pointcloud_plotly(depth_map, image, width=width, height=height)
+                    except Exception as e2:
+                        logger.warning(f"Plotly fallback failed: {str(e2)}")
+                        # Finally fall back to Matplotlib
                         return self.render_pointcloud_matplotlib(depth_map, image, width=width, height=height)
-                    else:
-                        # Re-raise non-CUDA runtime errors
-                        raise
                 
             else:
                 # Unknown method, fall back to depth map
