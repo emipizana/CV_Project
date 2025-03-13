@@ -293,6 +293,24 @@ class DepthReconstructor:
             # Fall back to Matplotlib rendering
             return self.render_pointcloud_matplotlib(depth_map, image, width, height, downsample_factor)
     
+    def is_headless_environment(self) -> bool:
+        """
+        Check if we're running in a headless environment without X server
+        
+        Returns:
+            True if headless, False otherwise
+        """
+        # Check for DISPLAY environment variable
+        display = os.environ.get('DISPLAY', '')
+        if not display:
+            return True
+            
+        # Also check for common headless flags
+        if 'SSH_CONNECTION' in os.environ and not os.environ.get('XAUTHORITY'):
+            return True
+            
+        return False
+    
     def render_pointcloud_pyvista(self, depth_map: np.ndarray, image: Image.Image,
                                 width: int = 800, height: int = 600,
                                 downsample_factor: int = 3) -> np.ndarray:
@@ -311,7 +329,19 @@ class DepthReconstructor:
         """
         logger.info(f"Rendering point cloud with PyVista (downsample={downsample_factor})")
         
+        # Check if we're in a headless environment
+        if self.is_headless_environment():
+            logger.warning("Headless environment detected, PyVista requires X server. Falling back to Plotly.")
+            return self.render_pointcloud_plotly(depth_map, image, width, height, downsample_factor)
+        
         try:
+            # Try to initialize xvfb if PyVista suggests it
+            try:
+                pv.start_xvfb()
+                logger.info("Started virtual framebuffer (xvfb) for PyVista rendering")
+            except Exception as e:
+                logger.warning(f"Could not start virtual framebuffer: {str(e)}")
+                
             # Create a PyVista plotter with the proper size
             plotter = pv.Plotter(off_screen=True, window_size=(width, height))
             
