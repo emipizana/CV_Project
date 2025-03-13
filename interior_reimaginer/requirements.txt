@@ -14,5 +14,6 @@ huggingface-hub>=0.14.1
 open3d>=0.16.0
 matplotlib>=3.6.0
 plotly>=5.14.0
-pyvista>=0.40.0
+trimesh>=3.9.0
+pyrender>=0.1.45
 kaleido>=0.2.1
