@@ -5,7 +5,8 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 from mpl_toolkits.mplot3d import Axes3D
 import plotly.graph_objects as go
-import pyvista as pv
+import trimesh
+import pyrender
 from PIL import Image
 import cv2
 import logging
@@ -296,10 +297,12 @@ class DepthReconstructor:
     
     def is_headless_environment(self) -> bool:
         """
-        Comprehensive check for headless environment and rendering capabilities
+        Check if running in a headless environment (no display)
+        
+        For Trimesh, this is mainly informational as it can render in headless environments.
         
         Returns:
-            True if headless or if visualization can't be initialized, False otherwise
+            True if headless, False otherwise
         """
         # Check for DISPLAY environment variable (X11)
         display = os.environ.get('DISPLAY', '')
@@ -318,41 +321,9 @@ class DepthReconstructor:
             logger.info("SSH connection without X forwarding detected")
             return True
         
-        # Try to verify GPU/OpenGL availability by attempting to create a test plotter
-        try:
-            logger.info("Testing PyVista initialization...")
-            test_plotter = pv.Plotter(off_screen=True, window_size=(10, 10))
-            test_plotter.close()
-            logger.info("PyVista initialized successfully - display available")
-            return False
-        except Exception as e:
-            logger.warning(f"Failed to initialize PyVista: {str(e)}")
-            return True
+        return False
     
-    def setup_virtual_framebuffer(self) -> bool:
-        """
-        Attempt to set up a virtual framebuffer for headless rendering
-        
-        Returns:
-            True if successfully set up, False otherwise
-        """
-        try:
-            # Try to initialize xvfb through PyVista
-            pv.start_xvfb()
-            logger.info("Started virtual framebuffer (xvfb) for PyVista rendering")
-            return True
-        except Exception as e:
-            logger.warning(f"Could not start virtual framebuffer: {str(e)}")
-            
-            # Additional diagnostic information
-            logger.info("To enable PyVista in headless environments:")
-            logger.info("1. Install xvfb: 'apt-get install xvfb'")
-            logger.info("2. Run with: 'xvfb-run -a python your_script.py'")
-            logger.info("   or set: 'export DISPLAY=:99.0 && Xvfb :99 -screen 0 1024x768x24 &'")
-            
-            return False
-    
-    def render_pointcloud_pyvista(self, 
+    def render_pointcloud_trimesh(self, 
                                 point_cloud: Optional[o3d.geometry.PointCloud] = None,
                                 depth_map: Optional[np.ndarray] = None, 
                                 image: Optional[Image.Image] = None,
@@ -360,7 +331,8 @@ class DepthReconstructor:
                                 height: int = 600,
                                 downsample_factor: int = 3) -> np.ndarray:
         """
-        Enhanced PyVista-based point cloud renderer with extensive options and fallbacks.
+        Enhanced Trimesh-based point cloud renderer with extensive options and fallbacks.
+        Works well in headless environments without requiring a virtual framebuffer.
         
         Can render either a provided point cloud or generate one from depth map & image.
         
@@ -375,24 +347,9 @@ class DepthReconstructor:
         Returns:
             Rendered point cloud as numpy array
         """
-        logger.info(f"Rendering point cloud with PyVista (downsample={downsample_factor})")
-        
-        # Check if we're in a headless environment and try to set up virtual framebuffer
-        if self.is_headless_environment():
-            if not self.setup_virtual_framebuffer():
-                logger.warning("Headless environment detected without virtual framebuffer. Falling back to Plotly.")
-                if point_cloud is not None:
-                    return self.render_pointcloud_image(point_cloud, width, height)
-                else:
-                    return self.render_pointcloud_plotly(depth_map, image, width, height, downsample_factor)
+        logger.info(f"Rendering point cloud with Trimesh (downsample={downsample_factor})")
         
         try:
-            # Configure advanced rendering settings
-            pv.rcParams['use_ipyvtk'] = False  # Ensure we're not using iPython/Jupyter rendering
-            
-            # Create a PyVista plotter with the proper size and settings
-            plotter = pv.Plotter(off_screen=True, window_size=(width, height))
-            
             # Process differently based on whether we got a point cloud or depth/image
             if point_cloud is not None and len(point_cloud.points) > 0:
                 # Use the provided point cloud
@@ -402,15 +359,13 @@ class DepthReconstructor:
                 points = np.asarray(point_cloud.points)
                 colors = np.asarray(point_cloud.colors)
                 
-                # Create PyVista point cloud
-                pv_cloud = pv.PolyData(points)
+                # Create Trimesh point cloud
+                cloud = trimesh.PointCloud(vertices=points)
                 
                 # Add colors if available
                 if colors.shape[0] == points.shape[0]:
-                    pv_cloud['rgb'] = colors
-                    add_with_rgb = True
-                else:
-                    add_with_rgb = False
+                    # Convert from float [0,1] to uint8 [0,255] for Trimesh
+                    cloud.colors = (colors * 255).astype(np.uint8)
                 
             else:
                 # Generate point cloud from depth map and image
@@ -438,7 +393,7 @@ class DepthReconstructor:
                 z = depth_norm[y_indices, x_indices]
                 x = x_indices
                 y = y_indices
-                colors = color_img[y_indices, x_indices] / 255.0
+                colors = color_img[y_indices, x_indices]
                 
                 # Flatten arrays
                 x = x.flatten()
@@ -460,65 +415,66 @@ class DepthReconstructor:
                 # Create point cloud data array with proper orientation
                 points = np.column_stack((x, z, -y))  # Use -y for correct orientation
                 
-                # Create PyVista point cloud
-                pv_cloud = pv.PolyData(points)
-                
-                # Add RGB colors to the point cloud
-                pv_cloud['rgb'] = rgb
-                add_with_rgb = True
+                # Create Trimesh point cloud
+                cloud = trimesh.PointCloud(vertices=points, colors=rgb)
             
-            # Add the point cloud to the plotter with proper settings
-            if add_with_rgb:
-                plotter.add_points(
-                    pv_cloud, 
-                    render_points_as_spheres=True, 
-                    point_size=5,  # Slightly larger for better visibility
-                    rgb=True,      # Use the RGB colors we added
-                    ambient=0.2,   # Add some ambient light
-                    diffuse=0.8,   # Add diffuse lighting for better depth perception
-                    specular=0.1   # Add a slight specular highlight
-                )
-            else:
-                plotter.add_points(
-                    pv_cloud, 
-                    render_points_as_spheres=True,
-                    point_size=5,
-                    color='tan'  # Default color if no colors are available
-                )
+            # Create a scene with the point cloud
+            scene = trimesh.Scene()
+            scene.add_geometry(cloud)
             
-            # Configure optimal camera and lighting for 3D visualization
-            plotter.set_background([0.9, 0.9, 0.9])  # Light gray background
+            # Get the extents of the scene for camera placement
+            bounds = scene.bounds
+            extents = bounds[1] - bounds[0]
             
-            # Add enhanced lighting setup
-            plotter.add_light(pv.Light(position=(1, 1, 1), intensity=0.7))
-            plotter.add_light(pv.Light(position=(-1, -1, -1), color='blue', intensity=0.3))
-            plotter.add_light(pv.Light(position=(0, 0, 1), color='white', intensity=0.3))
+            # Set up a camera looking at the center of the point cloud
+            center = scene.centroid
             
-            # Set up a nice camera view
-            plotter.camera_position = 'iso'  # Isometric view
-            plotter.camera.zoom(1.2)  # Zoom in slightly to focus on the model
+            # Calculate camera position: looking from the front, slightly above
+            camera_position = center + np.array([0, -2, 0.5]) * max(extents)
             
-            # Add orientation axes for context
-            plotter.add_axes(interactive=False, line_width=2)
+            # Look at the center of the cloud
+            camera_target = center
             
-            # Ensure proper rendering quality
-            plotter.renderer.SetSamples(8)  # Anti-aliasing for smoother edges
+            # Define the "up" direction
+            camera_up = np.array([0, 0, 1])
             
-            # Render to image
-            plotter.show(auto_close=False)
-            img = plotter.screenshot(return_img=True)
-            plotter.close()
+            # Compute the camera transform
+            camera_transform = trimesh.transformations.look_at(
+                camera_position,
+                camera_target,
+                camera_up
+            )
+            
+            # Create a scene camera
+            camera = trimesh.scene.Camera(
+                resolution=(width, height),
+                fov=(60, 40),  # horizontal, vertical field of view in degrees
+                transform=camera_transform
+            )
+            
+            # Add camera to the scene
+            scene.camera = camera
+            
+            # Render the scene
+            # Use pyrender for offscreen rendering
+            rendered = scene.save_image(
+                resolution=(width, height),
+                visible=True,
+                background=[230, 230, 230, 255]  # Light gray background
+            )
+            
+            # Convert the rendered image to a numpy array
+            img = np.asarray(rendered).astype(np.float32) / 255.0
             
             # Check if the result is valid (not all white or black)
             if img.mean() < 0.05 or img.mean() > 0.95:
-                logger.warning(f"PyVista rendering produced invalid image (too bright/dark): {img.mean()}")
+                logger.warning(f"Trimesh rendering produced invalid image (too bright/dark): {img.mean()}")
                 raise ValueError("Invalid rendering output")
             
-            # Convert to float32 and normalize
-            return img.astype(np.float32) / 255.0
+            return img
             
         except Exception as e:
-            logger.warning(f"Error rendering with PyVista: {str(e)}")
+            logger.warning(f"Error rendering with Trimesh: {str(e)}")
             
             # Try Plotly next (better than Matplotlib for 3D)
             try:
@@ -944,29 +900,29 @@ class DepthReconstructor:
             # Use a cascading set of rendering approaches, from most advanced to most reliable
             render_img = None
             render_methods = [
-                ("PyVista", lambda: self.render_pointcloud_pyvista(filtered_depth, image, width, height, downsample_factor)),
+                ("Trimesh", lambda: self.render_pointcloud_trimesh(filtered_depth, image, width, height, downsample_factor)),
                 ("Plotly", lambda: self.render_pointcloud_plotly(filtered_depth, image, width, height, downsample_factor)), 
                 ("Matplotlib", lambda: self.render_pointcloud_matplotlib(filtered_depth, image, width, height, downsample_factor))
             ]
             
-            # First try to render directly with the point cloud using the enhanced PyVista renderer
+            # First try to render directly with the point cloud using the enhanced Trimesh renderer
             try:
-                # Try to use PyVista's improved point cloud rendering directly with the point cloud
-                logger.info("Attempting PyVista rendering with direct point cloud")
-                render_img = self.render_pointcloud_pyvista(
+                # Try to use Trimesh's point cloud rendering directly with the point cloud
+                logger.info("Attempting Trimesh rendering with direct point cloud")
+                render_img = self.render_pointcloud_trimesh(
                     point_cloud=pcd,  # Pass the point cloud directly
                     width=width,
                     height=height
                 )
-                logger.info("Successfully rendered with PyVista direct point cloud")
+                logger.info("Successfully rendered with Trimesh direct point cloud")
                 return render_img, pcd
-            except Exception as pv_err:
-                logger.warning(f"PyVista direct point cloud rendering failed: {str(pv_err)}")
+            except Exception as tm_err:
+                logger.warning(f"Trimesh direct point cloud rendering failed: {str(tm_err)}")
                 
                 # Fall back to the tiered approach if direct rendering fails
                 render_img = None
                 render_methods = [
-                    ("PyVista", lambda: self.render_pointcloud_pyvista(
+                    ("Trimesh", lambda: self.render_pointcloud_trimesh(
                         depth_map=filtered_depth, 
                         image=image, 
                         width=width, 
@@ -1215,37 +1171,32 @@ class DepthReconstructor:
             
             logger.info(f"Final point cloud has {len(combined_pcd.points)} points")
             
-            # Try to render directly with the generated point cloud using the enhanced PyVista renderer
+            # Try to render directly with the generated point cloud using the enhanced Trimesh renderer
             try:
-                # Try to use PyVista's improved point cloud rendering directly with our combined point cloud
-                logger.info("Attempting PyVista rendering with direct LRM point cloud")
-                render_img = self.render_pointcloud_pyvista(
+                # Try to use Trimesh's point cloud rendering directly with our combined point cloud
+                logger.info("Attempting Trimesh rendering with direct LRM point cloud")
+                render_img = self.render_pointcloud_trimesh(
                     point_cloud=combined_pcd,  # Pass the combined point cloud directly
                     width=width,
                     height=height
                 )
-                logger.info("Successfully rendered LRM result with PyVista direct point cloud")
+                logger.info("Successfully rendered LRM result with Trimesh direct point cloud")
                 return render_img, combined_pcd
-            except Exception as pv_err:
-                logger.warning(f"PyVista direct LRM point cloud rendering failed: {str(pv_err)}")
+            except Exception as tm_err:
+                logger.warning(f"Trimesh direct LRM point cloud rendering failed: {str(tm_err)}")
                 
                 # Fall back to the tiered approach if direct rendering fails
                 try:
-                    # Check if we're in a headless environment
-                    if not self.is_headless_environment():
-                        logger.info("Rendering with PyVista from depth map")
-                        render_img = self.render_pointcloud_pyvista(
-                            depth_map=depth_map,
-                            image=image,
-                            width=width,
-                            height=height,
-                            downsample_factor=max(1, downsample_factor)
-                        )
-                    else:
-                        # Fall back to Plotly in headless environments
-                        raise RuntimeError("Headless environment, skipping PyVista")
+                    logger.info("Rendering with Trimesh from depth map")
+                    render_img = self.render_pointcloud_trimesh(
+                        depth_map=depth_map,
+                        image=image,
+                        width=width,
+                        height=height,
+                        downsample_factor=max(1, downsample_factor)
+                    )
                 except Exception as e:
-                    logger.warning(f"PyVista rendering failed: {str(e)}")
+                    logger.warning(f"Trimesh rendering failed: {str(e)}")
                     try:
                         # Try Plotly next
                         logger.info("Rendering with Plotly")
