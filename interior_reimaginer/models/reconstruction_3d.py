@@ -28,7 +28,8 @@ class DepthReconstructor:
         self.visualization_methods = {
             "depth_map": "Colored Depth Map (2D)",
             "pointcloud_mpl": "Matplotlib Point Cloud (3D)",
-            "enhanced_3d": "Enhanced 3D Reconstruction"
+            "enhanced_3d": "Enhanced 3D Reconstruction",
+            "lrm_3d": "LRM 3D Reconstruction"
         }
     
     def render_depth_map(self, depth_map: np.ndarray, colormap: int = cv2.COLORMAP_INFERNO,
@@ -894,6 +895,211 @@ class DepthReconstructor:
             
         return img
     
+    def lrm_reconstruction(self, depth_map: np.ndarray, image: Image.Image,
+                          width: int = 800, height: int = 600,
+                          downsample_factor: int = 2,
+                          patch_size: int = 32,
+                          overlap: int = 8) -> Tuple[np.ndarray, o3d.geometry.PointCloud]:
+        """
+        Create a 3D reconstruction using the Local Region Models (LRM) approach.
+        This divides the depth map into overlapping patches and processes each 
+        independently for more detailed local geometry.
+        
+        Args:
+            depth_map: Depth map as numpy array
+            image: Original color image
+            width: Desired output width
+            height: Desired output height
+            downsample_factor: Factor by which to downsample the point cloud
+            patch_size: Size of local patches to process
+            overlap: Overlap between adjacent patches
+            
+        Returns:
+            Tuple of (rendered image, point cloud)
+        """
+        logger.info(f"Creating LRM 3D reconstruction (patch_size={patch_size}, overlap={overlap})...")
+        
+        try:
+            # Debug information about the input depth map
+            logger.info(f"Depth map shape: {depth_map.shape}, range: [{depth_map.min()}, {depth_map.max()}]")
+            
+            # Ensure the depth map is valid
+            if depth_map.max() <= 0:
+                logger.warning("Invalid depth map (all zeros or negative)")
+                # Return a fallback colored depth map
+                return self.render_depth_map(depth_map, width=width, height=height), o3d.geometry.PointCloud()
+            
+            # Convert to float for processing
+            depth_float = depth_map.astype(np.float32)
+            
+            # Create an enhanced colored depth map visualization as a reliable fallback
+            enhanced_depth_viz = self.render_depth_map(depth_map, width=width, height=height)
+            
+            # Create empty point cloud to accumulate results from all patches
+            combined_pcd = o3d.geometry.PointCloud()
+            
+            # Get color image as RGB numpy array
+            color_img = np.array(image.convert('RGB'))
+            
+            # Ensure dimensions match
+            if color_img.shape[:2] != depth_map.shape[:2]:
+                color_img = cv2.resize(color_img, (depth_map.shape[1], depth_map.shape[0]))
+            
+            # Calculate patch parameters
+            h, w = depth_float.shape
+            step = patch_size - overlap
+            
+            # Calculate gradients over the whole image for confidence
+            depth_gradx = cv2.Sobel(depth_float, cv2.CV_32F, 1, 0, ksize=3)
+            depth_grady = cv2.Sobel(depth_float, cv2.CV_32F, 0, 1, ksize=3)
+            depth_grad_mag = np.sqrt(depth_gradx**2 + depth_grady**2)
+            
+            # Normalize gradient magnitude
+            if depth_grad_mag.max() > 0:
+                confidence = 1.0 - (depth_grad_mag / depth_grad_mag.max())
+            else:
+                confidence = np.ones_like(depth_map)
+            
+            patch_count = 0
+            total_patches = ((h - patch_size) // step + 1) * ((w - patch_size) // step + 1)
+            logger.info(f"Processing {total_patches} patches...")
+            
+            # Process each patch
+            for y in range(0, h - patch_size + 1, step):
+                for x in range(0, w - patch_size + 1, step):
+                    # Extract patch
+                    depth_patch = depth_float[y:y+patch_size, x:x+patch_size].copy()
+                    color_patch = color_img[y:y+patch_size, x:x+patch_size].copy()
+                    conf_patch = confidence[y:y+patch_size, x:x+patch_size].copy()
+                    
+                    # Skip patches with no valid depth
+                    if depth_patch.max() <= 0:
+                        continue
+                    
+                    # Apply confidence mask
+                    conf_threshold = 0.3  # Lower threshold for local patches
+                    conf_mask = conf_patch > conf_threshold
+                    filtered_depth = depth_patch.copy()
+                    filtered_depth[~conf_mask] = 0
+                    
+                    # If too many points were filtered out, revert to original
+                    if np.count_nonzero(filtered_depth) < 0.3 * np.count_nonzero(depth_patch):
+                        filtered_depth = depth_patch
+                    
+                    # Create local coordinates for the patch
+                    patch_y, patch_x = np.mgrid[0:patch_size, 0:patch_size]
+                    
+                    # Global coordinates (add offset)
+                    patch_y += y
+                    patch_x += x
+                    
+                    # Compute 3D coordinates
+                    focal_length = 525.0  # Approximate focal length
+                    cx, cy = w / 2, h / 2  # Image center
+                    
+                    # Convert to normalized device coordinates
+                    X = (patch_x - cx) * filtered_depth / focal_length
+                    Y = (patch_y - cy) * filtered_depth / focal_length
+                    Z = filtered_depth
+                    
+                    # Flatten and combine into points
+                    points = np.stack((X.flatten(), Y.flatten(), Z.flatten()), axis=1)
+                    colors = color_patch.reshape(-1, 3) / 255.0
+                    
+                    # Remove invalid points (zero depth)
+                    valid_indices = Z.flatten() > 0
+                    points = points[valid_indices]
+                    colors = colors[valid_indices]
+                    
+                    # Skip if no valid points
+                    if len(points) == 0:
+                        continue
+                    
+                    # Create patch point cloud
+                    patch_pcd = o3d.geometry.PointCloud()
+                    patch_pcd.points = o3d.utility.Vector3dVector(points)
+                    patch_pcd.colors = o3d.utility.Vector3dVector(colors)
+                    
+                    # Downsample patch point cloud
+                    if downsample_factor > 1:
+                        patch_pcd = patch_pcd.voxel_down_sample(voxel_size=0.01 * downsample_factor)
+                    
+                    # Add to combined point cloud
+                    combined_pcd += patch_pcd
+                    patch_count += 1
+                    
+                    # Log progress for large images
+                    if patch_count % 50 == 0:
+                        logger.info(f"Processed {patch_count}/{total_patches} patches...")
+            
+            logger.info(f"Successfully processed {patch_count} patches with valid depth data")
+            
+            # Check if point cloud generation succeeded
+            if combined_pcd is None or len(combined_pcd.points) == 0:
+                logger.warning("Failed to generate point cloud, falling back to colored depth map")
+                return enhanced_depth_viz, o3d.geometry.PointCloud()
+                
+            # Optional statistical outlier removal
+            if len(combined_pcd.points) > 100:  # Only if enough points
+                logger.info(f"Filtering noise from point cloud with {len(combined_pcd.points)} points")
+                combined_pcd, _ = combined_pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+            
+            logger.info(f"Final point cloud has {len(combined_pcd.points)} points")
+            
+            # Render the point cloud
+            # First try PyVista (best quality)
+            try:
+                # Check if we're in a headless environment
+                if not self.is_headless_environment():
+                    logger.info("Rendering with PyVista")
+                    render_img = self.render_pointcloud_pyvista(
+                        depth_map,  # Original depth map for coordinates
+                        image,      # Original image for colors
+                        width=width,
+                        height=height,
+                        downsample_factor=max(1, downsample_factor)
+                    )
+                else:
+                    # Fall back to Plotly in headless environments
+                    raise RuntimeError("Headless environment, skipping PyVista")
+            except Exception as e:
+                logger.warning(f"PyVista rendering failed: {str(e)}")
+                try:
+                    # Try Plotly next
+                    logger.info("Rendering with Plotly")
+                    render_img = self.render_pointcloud_plotly(
+                        depth_map,
+                        image,
+                        width=width,
+                        height=height,
+                        downsample_factor=max(1, downsample_factor)
+                    )
+                except Exception as e2:
+                    logger.warning(f"Plotly rendering failed: {str(e2)}")
+                    # Fall back to Matplotlib as last resort
+                    render_img = self.render_pointcloud_matplotlib(
+                        depth_map,
+                        image,
+                        width=width,
+                        height=height,
+                        downsample_factor=max(1, downsample_factor)
+                    )
+            
+            # Validate the rendered image
+            mean_value = render_img.mean()
+            if mean_value < 0.1 or mean_value > 0.95:
+                logger.warning(f"LRM rendering produced invalid image (too bright/dark)")
+                return enhanced_depth_viz, combined_pcd
+            
+            return render_img, combined_pcd
+            
+        except Exception as e:
+            logger.error(f"LRM reconstruction failed: {str(e)}")
+            # Return default depth map and empty point cloud as fallback
+            render_img = self.render_depth_map(depth_map, width=width, height=height)
+            pcd = o3d.geometry.PointCloud()  # Empty point cloud
+            return render_img, pcd
+    
     def visualize_3d(self, depth_map: np.ndarray, image: Image.Image, 
                     method: str = "depth_map", width: int = 800, height: int = 600) -> np.ndarray:
         """
@@ -977,6 +1183,29 @@ class DepthReconstructor:
                     # Handle CUDA-specific errors by falling back to CPU methods
                     if "CUDA" in str(cuda_err):
                         logger.warning(f"CUDA error in enhanced reconstruction: {str(cuda_err)}")
+                        logger.info("Falling back to matplotlib visualization (CPU-based)")
+                        return self.render_pointcloud_matplotlib(depth_map, image, width=width, height=height)
+                    else:
+                        # Re-raise non-CUDA runtime errors
+                        raise
+                        
+            elif method == "lrm_3d":
+                # Try to use the LRM 3D reconstruction
+                try:
+                    render_img, _ = self.lrm_reconstruction(
+                        depth_map=depth_map,
+                        image=image,
+                        width=width,
+                        height=height,
+                        downsample_factor=2,
+                        patch_size=32,
+                        overlap=8
+                    )
+                    return render_img
+                except RuntimeError as cuda_err:
+                    # Handle CUDA-specific errors by falling back to CPU methods
+                    if "CUDA" in str(cuda_err):
+                        logger.warning(f"CUDA error in LRM reconstruction: {str(cuda_err)}")
                         logger.info("Falling back to matplotlib visualization (CPU-based)")
                         return self.render_pointcloud_matplotlib(depth_map, image, width=width, height=height)
                     else:

@@ -219,6 +219,21 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
                                 value=depth_reconstructor.visualization_methods["depth_map"],
                                 label="Visualization Method"
                             )
+                            
+                        # Add an explanation of the new LRM method
+                        with gr.Accordion("About LRM 3D Reconstruction", open=False):
+                            gr.Markdown("""
+                            ## Local Region Models (LRM)
+                            
+                            LRM is an advanced 3D reconstruction method that:
+                            
+                            - Divides the depth map into overlapping patches
+                            - Processes each patch independently for better local detail
+                            - Combines results into a unified point cloud
+                            - Uses varying confidence thresholds to preserve more geometry
+                            
+                            This approach often captures more detail than global methods, especially for complex scenes.
+                            """)
                         
                         # Add a checkbox for automatically trying fallback methods
                         with gr.Row():
