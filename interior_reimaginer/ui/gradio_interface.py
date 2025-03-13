@@ -418,9 +418,51 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
             
             try:
                 # Process the image to get depth map
-                processed = reimaginer.image_processor.process_image(image)
+                try:
+                    processed = reimaginer.image_processor.process_image(image)
+                    depth_map = processed.depth_map
+                except Exception as e:
+                    # Handle errors in the process_image pipeline
+                    logger.error(f"Image processing error: {str(e)}")
+                    # Try to generate depth map directly using the depth estimation model
+                    # which should be more resilient than the full pipeline
+                    try:
+                        # Get direct access to the depth model from the image processor
+                        logger.info("Trying direct depth estimation")
+                        # Use the depth model directly if available
+                        if hasattr(reimaginer.image_processor, 'depth_model'):
+                            # Convert PIL image to tensor
+                            import torch
+                            from torchvision import transforms
+                            img_tensor = transforms.ToTensor()(image).unsqueeze(0)
+                            
+                            # Move to correct device (CPU if CUDA failed)
+                            if "CUDA" in str(e) and torch.cuda.is_available():
+                                logger.warning("CUDA error detected, using CPU instead")
+                                device = "cpu"
+                            else:
+                                device = reimaginer.image_processor.device
+                                
+                            img_tensor = img_tensor.to(device)
+                            
+                            # Get depth prediction
+                            with torch.no_grad():
+                                depth_tensor = reimaginer.image_processor.depth_model(img_tensor)
+                                
+                            # Convert to numpy
+                            depth_map = depth_tensor.squeeze().cpu().numpy()
+                            logger.info(f"Direct depth estimation succeeded: {depth_map.shape}")
+                        else:
+                            # Create a basic depth map as fallback
+                            logger.warning("No depth model available, creating synthetic depth map")
+                            # Convert to grayscale and use as simple depth
+                            img_gray = np.array(image.convert('L'))
+                            depth_map = 255 - img_gray  # Invert: darker is further
+                    except Exception as depth_err:
+                        logger.error(f"Failed to generate depth map: {str(depth_err)}")
+                        return None, f"Failed to generate depth map: {str(depth_err)}", None
                 
-                if processed.depth_map is None:
+                if depth_map is None:
                     return None, "Failed to generate depth map.", None
                 
                 # Map the visualization method display name back to its key
@@ -437,37 +479,65 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
                 state = {
                     "method": method_key,
                     "downsample": downsample,
-                    "depth_map": processed.depth_map,
+                    "depth_map": depth_map,
                     "image": image
                 }
                 
-                # Handle enhanced 3D reconstruction separately to store the point cloud
-                if method_key == "enhanced_3d":
-                    render_img, pcd = depth_reconstructor.enhanced_reconstruction(
-                        depth_map=processed.depth_map,
-                        image=image,
-                        width=800,
-                        height=600,
-                        downsample_factor=int(downsample)
-                    )
-                    
-                    # Store the point cloud for saving later
-                    if pcd is not None and len(pcd.points) > 0:
-                        state["pcd"] = pcd
-                        state["has_model"] = True
-                else:
-                    # Generate visualization using the unified method with fallbacks
-                    render_img = depth_reconstructor.visualize_3d(
-                        depth_map=processed.depth_map,
-                        image=image,
-                        method=method_key,
+                # Generate visualization using robust error handling
+                try:
+                    # Handle enhanced 3D reconstruction separately to store the point cloud
+                    if method_key == "enhanced_3d":
+                        render_img, pcd = depth_reconstructor.enhanced_reconstruction(
+                            depth_map=depth_map,
+                            image=image,
+                            width=800,
+                            height=600,
+                            downsample_factor=int(downsample)
+                        )
+                        
+                        # Store the point cloud for saving later
+                        if pcd is not None and len(pcd.points) > 0:
+                            state["pcd"] = pcd
+                            state["has_model"] = True
+                    else:
+                        # Generate visualization using the unified method with fallbacks
+                        render_img = depth_reconstructor.visualize_3d(
+                            depth_map=depth_map,
+                            image=image,
+                            method=method_key,
+                            width=800,
+                            height=600
+                        )
+                        
+                        # For standard point cloud, create it for saving if user requests it
+                        if method_key == "pointcloud_mpl":
+                            state["has_model"] = True
+                except RuntimeError as cuda_err:
+                    # Special handling for CUDA errors
+                    if "CUDA" in str(cuda_err):
+                        logger.warning(f"CUDA error in visualization: {str(cuda_err)}")
+                        # Fall back to depth map visualization
+                        render_img = depth_reconstructor.render_depth_map(
+                            depth_map,
+                            width=800,
+                            height=600
+                        )
+                        return_msg = f"CUDA error - falling back to depth map: {str(cuda_err)}"
+                    else:
+                        # Re-raise non-CUDA runtime errors
+                        raise
+                except Exception as viz_err:
+                    # Handle other visualization errors
+                    logger.error(f"Visualization error: {str(viz_err)}")
+                    render_img = depth_reconstructor.render_depth_map(
+                        depth_map,
                         width=800,
                         height=600
                     )
-                    
-                    # For standard point cloud, create it for saving if user requests it
-                    if method_key == "pointcloud_mpl":
-                        state["has_model"] = True
+                    return_msg = f"Error during visualization, falling back to depth map: {str(viz_err)}"
+                else:
+                    # If no exceptions, set success message
+                    return_msg = f"Successfully created 3D visualization using {viz_method}."
                 
                 # Convert the rendered image from float (0-1) to uint8 (0-255) if needed
                 if render_img.max() <= 1.0:
@@ -476,23 +546,24 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
                 # Create PIL image from numpy array
                 preview_img = Image.fromarray(render_img.astype(np.uint8))
                 
-                return preview_img, f"Successfully created 3D visualization using {viz_method}.", state
+                return preview_img, return_msg, state
                 
             except Exception as e:
                 logger.error(f"Error in 3D visualization: {e}")
                 if auto_fallback:
-                    # Try the most reliable method as fallback
+                    # Create a basic error message image
                     try:
-                        render_img = depth_reconstructor.render_depth_map(
-                            processed.depth_map,
-                            width=800,
-                            height=600
+                        error_img = depth_reconstructor.create_error_image(
+                            width=800, 
+                            height=600,
+                            message=f"Error in 3D visualization:\n{str(e)}\nPlease try a different image or method."
                         )
-                        render_img = (render_img * 255).astype(np.uint8)
-                        preview_img = Image.fromarray(render_img)
-                        return preview_img, f"Fallback to depth map visualization due to error: {str(e)}", None
-                    except:
-                        pass
+                        error_img = (error_img * 255).astype(np.uint8)
+                        preview_img = Image.fromarray(error_img)
+                        return preview_img, f"Error in 3D visualization: {str(e)}", None
+                    except Exception as error_img_err:
+                        logger.error(f"Failed to create error image: {str(error_img_err)}")
+                        
                 return None, f"Error in 3D visualization: {str(e)}", None
         
         def save_3d_model(state):

@@ -854,6 +854,46 @@ class DepthReconstructor:
             pcd = o3d.geometry.PointCloud()  # Empty point cloud
             return render_img, pcd
             
+    def create_error_image(self, width: int = 800, height: int = 600, message: str = "Error processing image") -> np.ndarray:
+        """
+        Create an error image with text for when visualization fails completely
+        
+        Args:
+            width: Image width
+            height: Image height
+            message: Error message to display
+            
+        Returns:
+            Error image as numpy array
+        """
+        # Create a gray background
+        img = np.ones((height, width, 3), dtype=np.float32) * 0.8
+        
+        # Use OpenCV to add text
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.8
+        font_thickness = 2
+        text_color = (0.2, 0.2, 0.2)  # Dark gray color for text
+        
+        # Split message by newlines and render each line
+        lines = message.split('\n')
+        line_height = 30
+        y_position = height // 2 - (len(lines) * line_height) // 2
+        
+        for line in lines:
+            # Get the size of the text
+            text_size = cv2.getTextSize(line, font, font_scale, font_thickness)[0]
+            x_position = (width - text_size[0]) // 2  # Center text horizontally
+            
+            # Put the text on the image
+            cv2.putText(
+                img, line, (x_position, y_position), 
+                font, font_scale, text_color, font_thickness
+            )
+            y_position += line_height
+            
+        return img
+    
     def visualize_3d(self, depth_map: np.ndarray, image: Image.Image, 
                     method: str = "depth_map", width: int = 800, height: int = 600) -> np.ndarray:
         """
@@ -879,9 +919,38 @@ class DepthReconstructor:
         # Check if inputs are valid
         if depth_map is None or depth_map.size == 0:
             logger.warning("Invalid depth map provided")
-            error_img = np.ones((height, width, 3), dtype=np.float32) * 0.8  # Light gray
-            # Add a message about the error
-            return error_img
+            return self.create_error_image(
+                width, height, 
+                "Unable to create 3D visualization.\nNo valid depth map available.\nTry a different image."
+            )
+        
+        # Check if image is valid
+        if image is None:
+            logger.warning("Invalid image provided")
+            # Try to use depth map alone if possible
+            if method == "depth_map":
+                return self.render_depth_map(depth_map, width=width, height=height)
+            else:
+                # For other methods that need the color image, create a grayscale image from depth
+                try:
+                    # Create a colored version of depth map to use as texture
+                    normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                    colored = cv2.applyColorMap(normalized, cv2.COLORMAP_INFERNO)
+                    colored_rgb = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
+                    # Convert to PIL image
+                    image = Image.fromarray(colored_rgb)
+                except Exception as e:
+                    logger.warning(f"Failed to create substitute color image: {str(e)}")
+                    return self.render_depth_map(depth_map, width=width, height=height)
+        
+        # Handle errors from previous processing steps (as seen in feedback)
+        if hasattr(image, 'size'):
+            # Make sure image has the right mode
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+        else:
+            logger.warning("Image object is not a valid PIL image")
+            return self.render_depth_map(depth_map, width=width, height=height)
         
         # Process based on method with fallbacks
         try:
@@ -895,14 +964,24 @@ class DepthReconstructor:
                                                       width=width, height=height)
                 
             elif method == "enhanced_3d":
-                # Use the enhanced 3D reconstruction
-                render_img, _ = self.enhanced_reconstruction(
-                    depth_map=depth_map,
-                    image=image,
-                    width=width,
-                    height=height
-                )
-                return render_img
+                # Try to use the enhanced 3D reconstruction 
+                try:
+                    render_img, _ = self.enhanced_reconstruction(
+                        depth_map=depth_map,
+                        image=image,
+                        width=width,
+                        height=height
+                    )
+                    return render_img
+                except RuntimeError as cuda_err:
+                    # Handle CUDA-specific errors by falling back to CPU methods
+                    if "CUDA" in str(cuda_err):
+                        logger.warning(f"CUDA error in enhanced reconstruction: {str(cuda_err)}")
+                        logger.info("Falling back to matplotlib visualization (CPU-based)")
+                        return self.render_pointcloud_matplotlib(depth_map, image, width=width, height=height)
+                    else:
+                        # Re-raise non-CUDA runtime errors
+                        raise
                 
             else:
                 # Unknown method, fall back to depth map
@@ -912,4 +991,14 @@ class DepthReconstructor:
         except Exception as e:
             # If all else fails, fall back to direct depth map visualization
             logger.warning(f"3D visualization failed with error: {str(e)}, falling back to depth map")
-            return self.render_depth_map(depth_map, width=width, height=height)
+            
+            # Try depth map rendering which should never fail
+            try:
+                return self.render_depth_map(depth_map, width=width, height=height)
+            except Exception as render_error:
+                # If even depth map rendering fails, return error image
+                logger.error(f"Depth map rendering also failed: {str(render_error)}")
+                return self.create_error_image(
+                    width, height, 
+                    f"3D visualization failed.\nError: {type(e).__name__}"
+                )
