@@ -4,12 +4,14 @@ import open3d as o3d
 import matplotlib.pyplot as plt
 from matplotlib import cm
 from mpl_toolkits.mplot3d import Axes3D
+import plotly.graph_objects as go
+import pyvista as pv
 from PIL import Image
 import cv2
 import logging
 import io
 import base64
-from typing import List, Dict, Tuple, Optional, Union, Any, Literal
+from typing import List, Dict, Tuple, Optional, Union, Any, Literal, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +77,8 @@ class DepthReconstructor:
                                    width: int = 800, height: int = 600,
                                    downsample_factor: int = 4) -> np.ndarray:
         """
-        Render a 3D point cloud using Matplotlib instead of Open3D.
-        This can serve as a fallback when Open3D visualization fails.
+        Render a 3D point cloud using Matplotlib with corrected orientation.
+        This can serve as a fallback when more advanced visualization fails.
         
         Args:
             depth_map: Depth map as numpy array
@@ -116,7 +118,7 @@ class DepthReconstructor:
             # Get 3D coordinates
             z = depth_norm[y_indices, x_indices]
             x = x_indices
-            y = y_indices
+            y = y_indices  # Will be inverted to correct orientation
             colors = color_img[y_indices, x_indices] / 255.0
             
             # Flatten arrays for scatter plot
@@ -134,24 +136,32 @@ class DepthReconstructor:
             
             # Normalize spatial coordinates
             x = (x - w/2) / w
-            y = (y - h/2) / h
+            y = -(y - h/2) / h  # Invert Y axis for correct orientation
             
             # Create scatter plot with colors
-            ax.scatter(x, z, y, c=colors, s=2, alpha=0.8)  # Note: y and z are swapped for better visualization
+            # Use x, z, -y for correct orientation (negative y makes the model upright)
+            ax.scatter(x, z, -y, c=colors, s=3, alpha=0.8)
             
             # Set equal aspect ratio and labels
             ax.set_box_aspect([1, 1, 1])
             ax.set_xlabel('X')
             ax.set_ylabel('Z (Depth)')
             ax.set_zlabel('Y')
-            ax.set_title('3D Point Cloud (Matplotlib)')
+            ax.set_title('3D Point Cloud')
             
             # Use light gray background for better visibility
-            ax.set_facecolor([0.8, 0.8, 0.8])
-            fig.patch.set_facecolor([0.8, 0.8, 0.8])
+            ax.set_facecolor([0.9, 0.9, 0.9])
+            fig.patch.set_facecolor([0.9, 0.9, 0.9])
             
-            # Set a good viewpoint
-            ax.view_init(elev=30, azim=-60)
+            # Set an improved viewpoint
+            ax.view_init(elev=20, azim=-35)  # Adjusted for better orientation
+            
+            # Remove grid for cleaner visualization
+            ax.grid(False)
+            
+            # Normalize axis directions
+            ax.set_xlim([-1, 1])
+            ax.set_zlim([-1, 1])
             
             # Capture the plot as an image
             fig.tight_layout(pad=0)
@@ -170,6 +180,218 @@ class DepthReconstructor:
             logger.warning(f"Error rendering with Matplotlib: {str(e)}")
             # Fall back to a simple depth map visualization
             return self.render_depth_map(depth_map, width=width, height=height)
+    
+    def render_pointcloud_plotly(self, depth_map: np.ndarray, image: Image.Image,
+                               width: int = 800, height: int = 600,
+                               downsample_factor: int = 4) -> np.ndarray:
+        """
+        Render a 3D point cloud using Plotly for high-quality visualization.
+        
+        Args:
+            depth_map: Depth map as numpy array
+            image: Original color image
+            width: Desired output width
+            height: Desired output height
+            downsample_factor: Factor by which to downsample the point cloud
+            
+        Returns:
+            Rendered point cloud as numpy array
+        """
+        logger.info(f"Rendering point cloud with Plotly (downsample={downsample_factor})")
+        
+        try:
+            # Normalize depth map
+            if depth_map.max() <= 255:
+                depth_norm = depth_map.astype(np.float32) / 255.0
+            else:
+                depth_norm = depth_map.astype(np.float32) / 1000.0
+
+            # Get color image as RGB numpy array
+            color_img = np.array(image.convert('RGB'))
+            
+            # Ensure dimensions match
+            if color_img.shape[:2] != depth_map.shape[:2]:
+                color_img = cv2.resize(color_img, (depth_map.shape[1], depth_map.shape[0]))
+            
+            # Downsample for better performance
+            h, w = depth_norm.shape
+            y_indices, x_indices = np.mgrid[0:h:downsample_factor, 0:w:downsample_factor]
+            
+            # Get 3D coordinates
+            z = depth_norm[y_indices, x_indices]
+            x = x_indices
+            y = y_indices
+            colors = color_img[y_indices, x_indices]
+            
+            # Flatten arrays for scatter plot
+            x = x.flatten()
+            y = y.flatten()
+            z = z.flatten()
+            
+            # Filter out invalid points
+            valid = (z > 0)
+            x = x[valid]
+            y = y[valid]
+            z = z[valid]
+            
+            # Normalize spatial coordinates
+            x = (x - w/2) / w
+            y = -(y - h/2) / h  # Invert Y axis for correct orientation
+            
+            # Extract RGB values from the image for Plotly
+            r = colors[..., 0].flatten()[valid]
+            g = colors[..., 1].flatten()[valid]
+            b = colors[..., 2].flatten()[valid]
+            
+            # Create color strings in 'rgb(r,g,b)' format
+            color_strs = [f'rgb({r[i]},{g[i]},{b[i]})' for i in range(len(r))]
+            
+            # Create the 3D scatter plot
+            fig = go.Figure(data=[go.Scatter3d(
+                x=x,
+                y=z,  # Use z for y-axis (depth)
+                z=-y,  # Negative y for correct orientation
+                mode='markers',
+                marker=dict(
+                    size=2,
+                    color=color_strs,
+                    opacity=0.8
+                )
+            )])
+            
+            # Set layout for better visualization
+            fig.update_layout(
+                width=width,
+                height=height,
+                scene=dict(
+                    xaxis_title='X',
+                    yaxis_title='Z (Depth)',
+                    zaxis_title='Y',
+                    aspectratio=dict(x=1, y=1, z=1),
+                    camera=dict(
+                        eye=dict(x=1.2, y=1.2, z=1.2),
+                        up=dict(x=0, y=0, z=1)
+                    ),
+                    xaxis=dict(showgrid=False, zeroline=False),
+                    yaxis=dict(showgrid=False, zeroline=False),
+                    zaxis=dict(showgrid=False, zeroline=False)
+                ),
+                margin=dict(l=0, r=0, b=0, t=0),
+                paper_bgcolor='rgb(240, 240, 240)',
+                plot_bgcolor='rgb(240, 240, 240)'
+            )
+            
+            # Render to image
+            img_bytes = fig.to_image(format="png")
+            img = np.array(Image.open(io.BytesIO(img_bytes)))
+            
+            # Convert to float32 and normalize
+            return img.astype(np.float32) / 255.0
+            
+        except Exception as e:
+            logger.warning(f"Error rendering with Plotly: {str(e)}")
+            # Fall back to Matplotlib rendering
+            return self.render_pointcloud_matplotlib(depth_map, image, width, height, downsample_factor)
+    
+    def render_pointcloud_pyvista(self, depth_map: np.ndarray, image: Image.Image,
+                                width: int = 800, height: int = 600,
+                                downsample_factor: int = 3) -> np.ndarray:
+        """
+        Render a 3D point cloud using PyVista (VTK-based) for high-quality rendering.
+        
+        Args:
+            depth_map: Depth map as numpy array
+            image: Original color image
+            width: Desired output width
+            height: Desired output height
+            downsample_factor: Factor by which to downsample the point cloud
+            
+        Returns:
+            Rendered point cloud as numpy array
+        """
+        logger.info(f"Rendering point cloud with PyVista (downsample={downsample_factor})")
+        
+        try:
+            # Create a PyVista plotter with the proper size
+            plotter = pv.Plotter(off_screen=True, window_size=(width, height))
+            
+            # Normalize depth map
+            if depth_map.max() <= 255:
+                depth_norm = depth_map.astype(np.float32) / 255.0
+            else:
+                depth_norm = depth_map.astype(np.float32) / 1000.0
+
+            # Get color image as RGB numpy array
+            color_img = np.array(image.convert('RGB'))
+            
+            # Ensure dimensions match
+            if color_img.shape[:2] != depth_map.shape[:2]:
+                color_img = cv2.resize(color_img, (depth_map.shape[1], depth_map.shape[0]))
+            
+            # Downsample for better performance
+            h, w = depth_norm.shape
+            y_indices, x_indices = np.mgrid[0:h:downsample_factor, 0:w:downsample_factor]
+            
+            # Get 3D coordinates
+            z = depth_norm[y_indices, x_indices]
+            x = x_indices
+            y = y_indices
+            colors = color_img[y_indices, x_indices] / 255.0
+            
+            # Flatten arrays
+            x = x.flatten()
+            y = y.flatten()
+            z = z.flatten()
+            rgb = colors.reshape(-1, 3)
+            
+            # Filter out invalid points
+            valid = (z > 0)
+            x = x[valid]
+            y = y[valid]
+            z = z[valid]
+            rgb = rgb[valid]
+            
+            # Normalize spatial coordinates
+            x = (x - w/2) / w
+            y = -(y - h/2) / h  # Invert Y axis
+            
+            # Create point cloud data array
+            points = np.column_stack((x, z, -y))  # Use -y for correct orientation
+            
+            # Create PyVista point cloud
+            point_cloud = pv.PolyData(points)
+            
+            # Add RGB colors to the point cloud
+            point_cloud['rgb'] = rgb
+            
+            # Add to the plotter with a good point size
+            plotter.add_points(point_cloud, render_points_as_spheres=True, point_size=4, rgb=True)
+            
+            # Set up a nice camera view
+            plotter.view_isometric()
+            plotter.set_background([0.9, 0.9, 0.9])  # Light gray background
+            
+            # Add better lighting
+            plotter.add_light(pv.Light(position=(1, 1, 1)))
+            plotter.add_light(pv.Light(position=(-1, -1, -1), color='blue'))
+            
+            # Render to image
+            plotter.show(auto_close=False)
+            img = plotter.screenshot(return_img=True)
+            plotter.close()
+            
+            # Convert to float32 and normalize
+            return img.astype(np.float32) / 255.0
+            
+        except Exception as e:
+            logger.warning(f"Error rendering with PyVista: {str(e)}")
+            # Try Plotly next
+            try:
+                return self.render_pointcloud_plotly(depth_map, image, width, height, downsample_factor)
+            except Exception as e2:
+                logger.warning(f"Error with Plotly fallback: {str(e2)}")
+                # Fall back to Matplotlib rendering
+                return self.render_pointcloud_matplotlib(depth_map, image, width, height, downsample_factor)
     
     def depth_to_pointcloud(self, 
                            depth_map: np.ndarray, 
@@ -481,7 +703,8 @@ class DepthReconstructor:
                               width: int = 800, height: int = 600,
                               downsample_factor: int = 2) -> Tuple[np.ndarray, o3d.geometry.PointCloud]:
         """
-        Create an enhanced 3D reconstruction using depth gradient analysis and confidence-based filtering
+        Create an enhanced 3D reconstruction using depth gradient analysis, confidence-based 
+        filtering, and advanced rendering approaches.
         
         Args:
             depth_map: Depth map as numpy array
@@ -524,7 +747,7 @@ class DepthReconstructor:
                 confidence = np.ones_like(depth_map)
             
             # Lower the confidence threshold to keep more points while still filtering noise
-            confidence_threshold = 0.5  # More forgiving threshold (previously 0.7)
+            confidence_threshold = 0.5  # More forgiving threshold
             confidence_mask = confidence > confidence_threshold
             
             # Count points before and after confidence filtering
@@ -541,7 +764,7 @@ class DepthReconstructor:
                 logger.warning("Filtered depth map is empty, using original depth map")
                 filtered_depth = depth_map  # Fallback to original
             
-            # Create an enhanced colored depth map visualization 
+            # Create an enhanced colored depth map visualization as a reliable fallback
             enhanced_depth_viz = self.render_depth_map(filtered_depth, width=width, height=height)
             
             # Create a higher quality point cloud with confidence filtering
@@ -557,22 +780,39 @@ class DepthReconstructor:
                 return enhanced_depth_viz, o3d.geometry.PointCloud()
                 
             logger.info(f"Generated point cloud with {len(pcd.points)} points")
-                
-            # For debugging, try to visualize the point cloud using Matplotlib first
-            # This is more reliable than Open3D visualization
-            render_img = self.render_pointcloud_matplotlib(
-                depth_map=filtered_depth, 
-                image=image,
-                width=width,
-                height=height,
-                downsample_factor=max(1, downsample_factor)
-            )
             
-            # Check if the rendered image is valid (not too bright)
-            mean_value = render_img.mean()
-            logger.info(f"Rendered image mean value: {mean_value}")
-            if mean_value > 0.95:  # Almost white
-                logger.warning("Matplotlib rendering too bright, falling back to colored depth map")
+            # Use a cascading set of rendering approaches, from most advanced to most reliable
+            render_img = None
+            render_methods = [
+                ("PyVista", lambda: self.render_pointcloud_pyvista(filtered_depth, image, width, height, downsample_factor)),
+                ("Plotly", lambda: self.render_pointcloud_plotly(filtered_depth, image, width, height, downsample_factor)), 
+                ("Matplotlib", lambda: self.render_pointcloud_matplotlib(filtered_depth, image, width, height, downsample_factor))
+            ]
+            
+            # Try each rendering method in order until one succeeds
+            for method_name, render_func in render_methods:
+                try:
+                    logger.info(f"Attempting 3D rendering with {method_name}")
+                    render_img = render_func()
+                    
+                    # Validate the rendered image
+                    mean_value = render_img.mean()
+                    logger.info(f"{method_name} rendering result: mean value = {mean_value}")
+                    
+                    # Check if the image is too bright or too dark
+                    if mean_value < 0.1 or mean_value > 0.95:
+                        logger.warning(f"{method_name} rendering produced invalid image (too bright/dark)")
+                        continue
+                    
+                    logger.info(f"Successfully rendered with {method_name}")
+                    break  # Stop if we got a good render
+                    
+                except Exception as e:
+                    logger.warning(f"{method_name} rendering failed: {str(e)}")
+            
+            # If all rendering methods failed, use the color depth map
+            if render_img is None or render_img.mean() < 0.1 or render_img.mean() > 0.95:
+                logger.warning("All 3D rendering methods failed, using colored depth map")
                 return enhanced_depth_viz, pcd
                 
             return render_img, pcd
