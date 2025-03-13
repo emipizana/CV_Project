@@ -240,12 +240,11 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
                             gr.Markdown("""
                             ## Visualization Methods
                             
-                            - **Direct Depth Map (2D)**: A colored heat map representation of depth - most reliable but least 3D-like
-                            - **3D Point Cloud (Matplotlib)**: 3D visualization using Matplotlib - works in most environments
-                            - **3D Point Cloud (Open3D)**: High-quality 3D point cloud rendering with Open3D
-                            - **3D Mesh**: Create and visualize a 3D mesh - most detailed but can fail on complex scenes
+                            - **Colored Depth Map (2D)**: A colored heat map representation of depth using COLORMAP_INFERNO - most reliable method
+                            - **Matplotlib Point Cloud (3D)**: Interactive 3D point cloud rendering that works across all platforms
+                            - **Enhanced 3D Reconstruction**: Advanced point cloud with confidence-based filtering for higher quality
                             
-                            The system will automatically fall back to simpler methods if a more complex visualization fails.
+                            The system automatically applies gradient-based confidence filtering in the Enhanced 3D Reconstruction mode for better point quality. All modes allow you to export the 3D model to use in other software.
                             """)
 
             # Style Explorer Tab
@@ -434,45 +433,41 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
                 if method_key is None:
                     return None, "Invalid visualization method selected.", None
                 
-                # Create a point cloud if needed for saving
-                pcd = None
-                mesh = None
-                if method_key in ["pointcloud_o3d", "mesh"]:
-                    # We'll need the point cloud for saving later
-                    pcd = depth_reconstructor.depth_to_pointcloud(
+                # Create state for storing models
+                state = {
+                    "method": method_key,
+                    "downsample": downsample,
+                    "depth_map": processed.depth_map,
+                    "image": image
+                }
+                
+                # Handle enhanced 3D reconstruction separately to store the point cloud
+                if method_key == "enhanced_3d":
+                    render_img, pcd = depth_reconstructor.enhanced_reconstruction(
                         depth_map=processed.depth_map,
                         image=image,
+                        width=800,
+                        height=600,
                         downsample_factor=int(downsample)
                     )
                     
-                    # Create mesh if requested
-                    if method_key == "mesh":
-                        try:
-                            mesh = depth_reconstructor.pointcloud_to_mesh(pcd)
-                        except Exception as e:
-                            if not auto_fallback:
-                                return None, f"Mesh creation failed: {str(e)}", None
-                            logger.warning(f"Mesh creation failed, falling back to point cloud: {str(e)}")
-                            method_key = "pointcloud_o3d"
-                
-                # Generate visualization using the unified method with fallbacks
-                render_img = depth_reconstructor.visualize_3d(
-                    depth_map=processed.depth_map,
-                    image=image,
-                    method=method_key,
-                    width=800,
-                    height=600
-                )
-                
-                # Store data for later use when saving
-                state = {
-                    "method": method_key,
-                    "downsample": downsample
-                }
-                if pcd is not None:
-                    state["pcd"] = pcd
-                if mesh is not None:
-                    state["mesh"] = mesh
+                    # Store the point cloud for saving later
+                    if pcd is not None and len(pcd.points) > 0:
+                        state["pcd"] = pcd
+                        state["has_model"] = True
+                else:
+                    # Generate visualization using the unified method with fallbacks
+                    render_img = depth_reconstructor.visualize_3d(
+                        depth_map=processed.depth_map,
+                        image=image,
+                        method=method_key,
+                        width=800,
+                        height=600
+                    )
+                    
+                    # For standard point cloud, create it for saving if user requests it
+                    if method_key == "pointcloud_mpl":
+                        state["has_model"] = True
                 
                 # Convert the rendered image from float (0-1) to uint8 (0-255) if needed
                 if render_img.max() <= 1.0:

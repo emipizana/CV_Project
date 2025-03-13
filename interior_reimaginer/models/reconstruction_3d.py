@@ -24,10 +24,9 @@ class DepthReconstructor:
         
         # Define all available visualization methods
         self.visualization_methods = {
-            "depth_map": "Direct Depth Map (2D)",
-            "pointcloud_o3d": "3D Point Cloud (Open3D)",
-            "pointcloud_mpl": "3D Point Cloud (Matplotlib)",
-            "mesh": "3D Mesh"
+            "depth_map": "Colored Depth Map (2D)",
+            "pointcloud_mpl": "Matplotlib Point Cloud (3D)",
+            "enhanced_3d": "Enhanced 3D Reconstruction"
         }
     
     def render_depth_map(self, depth_map: np.ndarray, colormap: int = cv2.COLORMAP_INFERNO,
@@ -478,6 +477,81 @@ class DepthReconstructor:
             fallback_img = np.ones((height, width, 3), dtype=np.float32) * 0.8  # Light gray
             return fallback_img
 
+    def enhanced_reconstruction(self, depth_map: np.ndarray, image: Image.Image,
+                              width: int = 800, height: int = 600,
+                              downsample_factor: int = 2) -> Tuple[np.ndarray, o3d.geometry.PointCloud]:
+        """
+        Create an enhanced 3D reconstruction using depth gradient analysis and confidence-based filtering
+        
+        Args:
+            depth_map: Depth map as numpy array
+            image: Original color image
+            width: Desired output width
+            height: Desired output height
+            downsample_factor: Factor by which to downsample the point cloud
+            
+        Returns:
+            Tuple of (rendered image, point cloud)
+        """
+        logger.info("Creating enhanced 3D reconstruction...")
+        
+        try:
+            # Calculate depth confidence using gradient analysis
+            # Areas with high gradient (edges) are less reliable
+            depth_gradx = cv2.Sobel(depth_map, cv2.CV_32F, 1, 0, ksize=3)
+            depth_grady = cv2.Sobel(depth_map, cv2.CV_32F, 0, 1, ksize=3)
+            depth_grad_mag = np.sqrt(depth_gradx**2 + depth_grady**2)
+            
+            # Normalize gradient magnitude
+            if depth_grad_mag.max() > 0:
+                confidence = 1.0 - (depth_grad_mag / depth_grad_mag.max())
+            else:
+                confidence = np.ones_like(depth_map)
+            
+            # Apply confidence threshold
+            confidence_mask = confidence > 0.7  # Only keep points with high confidence
+            
+            # Apply confidence mask to depth map
+            filtered_depth = depth_map.copy()
+            filtered_depth[~confidence_mask] = 0
+            
+            # Create a higher quality point cloud with confidence filtering
+            pcd = self.depth_to_pointcloud(
+                depth_map=filtered_depth,
+                image=image,
+                downsample_factor=downsample_factor
+            )
+            
+            # Render the enhanced point cloud using Open3D
+            try:
+                # Try Open3D rendering first
+                render_img = self.render_pointcloud_image(pcd, width=width, height=height, zoom=0.7)
+                
+                # Check if valid (not too dark)
+                if render_img.mean() < 0.1:
+                    raise Exception("Open3D rendering too dark")
+                    
+            except Exception as e:
+                logger.warning(f"Enhanced 3D Open3D visualization failed: {str(e)}")
+                
+                # Fall back to Matplotlib rendering
+                render_img = self.render_pointcloud_matplotlib(
+                    depth_map=filtered_depth, 
+                    image=image,
+                    width=width,
+                    height=height,
+                    downsample_factor=max(1, downsample_factor)
+                )
+                
+            return render_img, pcd
+            
+        except Exception as e:
+            logger.error(f"Enhanced reconstruction failed: {str(e)}")
+            # Return default depth map and empty point cloud as fallback
+            render_img = self.render_depth_map(depth_map, width=width, height=height)
+            pcd = o3d.geometry.PointCloud()  # Empty point cloud
+            return render_img, pcd
+            
     def visualize_3d(self, depth_map: np.ndarray, image: Image.Image, 
                     method: str = "depth_map", width: int = 800, height: int = 600) -> np.ndarray:
         """
@@ -518,32 +592,21 @@ class DepthReconstructor:
                 return self.render_pointcloud_matplotlib(depth_map, image, 
                                                       width=width, height=height)
                 
-            elif method == "pointcloud_o3d" or method == "mesh":
-                # Create point cloud first (common for both Open3D methods)
-                pcd = self.depth_to_pointcloud(depth_map, image)
+            elif method == "enhanced_3d":
+                # Use the enhanced 3D reconstruction
+                render_img, _ = self.enhanced_reconstruction(
+                    depth_map=depth_map,
+                    image=image,
+                    width=width,
+                    height=height
+                )
+                return render_img
                 
-                if method == "pointcloud_o3d":
-                    # Open3D point cloud visualization
-                    result = self.render_pointcloud_image(pcd, width=width, height=height)
-                else:
-                    # Mesh visualization (most complex, most likely to fail)
-                    try:
-                        # Try to create and render mesh
-                        mesh = self.pointcloud_to_mesh(pcd)
-                        result = self.render_mesh_image(mesh, width=width, height=height)
-                    except Exception as e:
-                        # If mesh creation/rendering fails, fall back to point cloud
-                        logger.warning(f"Mesh creation/rendering failed: {str(e)}, falling back to point cloud")
-                        result = self.render_pointcloud_image(pcd, width=width, height=height)
+            else:
+                # Unknown method, fall back to depth map
+                logger.warning(f"Unknown visualization method: {method}, falling back to depth_map")
+                return self.render_depth_map(depth_map, width=width, height=height)
                 
-                # Check if the result is valid (not too dark/light)
-                if result is None or result.mean() < 0.1 or result.mean() > 0.9:
-                    # Invalid result, try matplotlib
-                    logger.warning("Open3D rendering produced invalid result, trying Matplotlib")
-                    result = self.render_pointcloud_matplotlib(depth_map, image, 
-                                                           width=width, height=height)
-                    
-                return result
         except Exception as e:
             # If all else fails, fall back to direct depth map visualization
             logger.warning(f"3D visualization failed with error: {str(e)}, falling back to depth map")
