@@ -212,19 +212,41 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
                             )
                         
                         with gr.Row():
+                            # Use the visualization methods from DepthReconstructor
+                            depth_reconstructor = DepthReconstructor()
                             recon_options = gr.Radio(
-                                choices=["Point Cloud", "Mesh"],
-                                value="Point Cloud",
-                                label="3D Reconstruction Type"
+                                choices=list(depth_reconstructor.visualization_methods.values()),
+                                value=depth_reconstructor.visualization_methods["depth_map"],
+                                label="Visualization Method"
+                            )
+                        
+                        # Add a checkbox for automatically trying fallback methods
+                        with gr.Row():
+                            auto_fallback = gr.Checkbox(
+                                label="Auto-fallback to simpler methods if needed",
+                                value=True
                             )
                             
-                        recon_generate_btn = gr.Button("Generate 3D Model", variant="primary")
+                        recon_generate_btn = gr.Button("Generate 3D Visualization", variant="primary")
                         recon_save_btn = gr.Button("Save 3D Model")
                         
                     with gr.Column(scale=1):
-                        recon_output = gr.Image(label="3D Reconstruction Preview")
+                        recon_output = gr.Image(label="3D Visualization Preview")
                         recon_status = gr.Textbox(label="Status")
                         recon_download = gr.File(label="Download 3D Model")
+                        
+                        # Add explanation of visualization methods
+                        with gr.Accordion("About 3D Visualization Methods", open=False):
+                            gr.Markdown("""
+                            ## Visualization Methods
+                            
+                            - **Direct Depth Map (2D)**: A colored heat map representation of depth - most reliable but least 3D-like
+                            - **3D Point Cloud (Matplotlib)**: 3D visualization using Matplotlib - works in most environments
+                            - **3D Point Cloud (Open3D)**: High-quality 3D point cloud rendering with Open3D
+                            - **3D Mesh**: Create and visualize a 3D mesh - most detailed but can fail on complex scenes
+                            
+                            The system will automatically fall back to simpler methods if a more complex visualization fails.
+                            """)
 
             # Style Explorer Tab
             with gr.TabItem("Style Explorer", elem_classes="tab-content"):
@@ -391,7 +413,7 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
         )
         
         # 3D Reconstruction functionality
-        def generate_3d_model(image, downsample, model_type):
+        def generate_3d_visualization(image, downsample, viz_method, auto_fallback):
             if image is None:
                 return None, "Please upload an image first.", None
             
@@ -402,42 +424,81 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
                 if processed.depth_map is None:
                     return None, "Failed to generate depth map.", None
                 
-                # Create point cloud from depth map
-                pcd = depth_reconstructor.depth_to_pointcloud(
+                # Map the visualization method display name back to its key
+                method_key = None
+                for key, value in depth_reconstructor.visualization_methods.items():
+                    if value == viz_method:
+                        method_key = key
+                        break
+                
+                if method_key is None:
+                    return None, "Invalid visualization method selected.", None
+                
+                # Create a point cloud if needed for saving
+                pcd = None
+                mesh = None
+                if method_key in ["pointcloud_o3d", "mesh"]:
+                    # We'll need the point cloud for saving later
+                    pcd = depth_reconstructor.depth_to_pointcloud(
+                        depth_map=processed.depth_map,
+                        image=image,
+                        downsample_factor=int(downsample)
+                    )
+                    
+                    # Create mesh if requested
+                    if method_key == "mesh":
+                        try:
+                            mesh = depth_reconstructor.pointcloud_to_mesh(pcd)
+                        except Exception as e:
+                            if not auto_fallback:
+                                return None, f"Mesh creation failed: {str(e)}", None
+                            logger.warning(f"Mesh creation failed, falling back to point cloud: {str(e)}")
+                            method_key = "pointcloud_o3d"
+                
+                # Generate visualization using the unified method with fallbacks
+                render_img = depth_reconstructor.visualize_3d(
                     depth_map=processed.depth_map,
                     image=image,
-                    downsample_factor=int(downsample)
+                    method=method_key,
+                    width=800,
+                    height=600
                 )
                 
-                # Store the point cloud in a state variable for later use
-                state = {"pcd": pcd, "type": model_type}
+                # Store data for later use when saving
+                state = {
+                    "method": method_key,
+                    "downsample": downsample
+                }
+                if pcd is not None:
+                    state["pcd"] = pcd
+                if mesh is not None:
+                    state["mesh"] = mesh
                 
-                # Create mesh if requested
-                if model_type == "Mesh":
-                    try:
-                        mesh = depth_reconstructor.pointcloud_to_mesh(pcd)
-                        state["mesh"] = mesh
-                        # Render the mesh to an image
-                        render_img = depth_reconstructor.render_mesh_image(mesh)
-                    except Exception as e:
-                        logger.error(f"Error creating mesh: {e}")
-                        return None, f"Error creating mesh: {str(e)}", None
-                else:
-                    # Render the point cloud to an image
-                    render_img = depth_reconstructor.render_pointcloud_image(pcd)
-                
-                # Convert the rendered image from float (0-1) to uint8 (0-255)
+                # Convert the rendered image from float (0-1) to uint8 (0-255) if needed
                 if render_img.max() <= 1.0:
                     render_img = (render_img * 255).astype(np.uint8)
                 
                 # Create PIL image from numpy array
-                preview_img = Image.fromarray(render_img)
+                preview_img = Image.fromarray(render_img.astype(np.uint8))
                 
-                return preview_img, f"Successfully created 3D {model_type.lower()}.", state
+                return preview_img, f"Successfully created 3D visualization using {viz_method}.", state
                 
             except Exception as e:
-                logger.error(f"Error in 3D reconstruction: {e}")
-                return None, f"Error in 3D reconstruction: {str(e)}", None
+                logger.error(f"Error in 3D visualization: {e}")
+                if auto_fallback:
+                    # Try the most reliable method as fallback
+                    try:
+                        render_img = depth_reconstructor.render_depth_map(
+                            processed.depth_map,
+                            width=800,
+                            height=600
+                        )
+                        render_img = (render_img * 255).astype(np.uint8)
+                        preview_img = Image.fromarray(render_img)
+                        return preview_img, f"Fallback to depth map visualization due to error: {str(e)}", None
+                    except:
+                        pass
+                return None, f"Error in 3D visualization: {str(e)}", None
         
         def save_3d_model(state):
             if state is None or "pcd" not in state:
@@ -462,10 +523,34 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
                 return None, f"Error saving 3D model: {str(e)}"
         
         recon_generate_btn.click(
-            generate_3d_model,
-            inputs=[recon_input_image, downsample_factor, recon_options],
+            generate_3d_visualization,
+            inputs=[recon_input_image, downsample_factor, recon_options, auto_fallback],
             outputs=[recon_output, recon_status, gr.State(None)]
         )
+        
+        def save_3d_model(state):
+            if state is None:
+                return None, "No 3D model has been generated yet."
+            
+            try:
+                timestamp = int(time.time())
+                
+                if "mesh" in state and state["mesh"] is not None:
+                    # Save mesh
+                    filename = f"reconstruction_mesh_{timestamp}"
+                    filepath = depth_reconstructor.save_mesh(state["mesh"], filename)
+                    return filepath, f"Mesh saved as {filepath}"
+                elif "pcd" in state and state["pcd"] is not None:
+                    # Save point cloud
+                    filename = f"reconstruction_pointcloud_{timestamp}"
+                    filepath = depth_reconstructor.save_pointcloud(state["pcd"], filename)
+                    return filepath, f"Point cloud saved as {filepath}"
+                else:
+                    return None, "No 3D model available to save. Try generating a Point Cloud or Mesh first."
+                    
+            except Exception as e:
+                logger.error(f"Error saving 3D model: {e}")
+                return None, f"Error saving 3D model: {str(e)}"
         
         recon_save_btn.click(
             save_3d_model,
