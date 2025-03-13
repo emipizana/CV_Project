@@ -183,6 +183,15 @@ class DepthReconstructor:
         Returns:
             Rendered image as numpy array
         """
+        # Debug information
+        logger.info(f"Rendering point cloud with {len(pcd.points)} points")
+        
+        # Check if point cloud has points
+        if len(pcd.points) == 0:
+            logger.warning("Point cloud is empty, creating a message image instead")
+            fallback_img = np.ones((height, width, 3), dtype=np.float32) * 0.8  # Light gray
+            return fallback_img
+            
         vis = o3d.visualization.Visualizer()
         vis.create_window(visible=False, width=width, height=height)
         vis.add_geometry(pcd)
@@ -191,11 +200,25 @@ class DepthReconstructor:
         try:
             view_control = vis.get_view_control()
             if view_control is not None:
+                # Position the camera to see the entire point cloud
+                camera_params = view_control.convert_to_pinhole_camera_parameters()
+                
+                # Get the bounding box of the point cloud
+                bbox = pcd.get_axis_aligned_bounding_box()
+                center = bbox.get_center()
+                
+                # Set a reasonable default viewpoint
+                view_control.set_front([0, 0, -1])  # Look at the model from the front
+                view_control.set_up([0, -1, 0])     # Up direction
+                view_control.set_lookat(center)     # Look at the center of the model
                 view_control.set_zoom(zoom)
             
-            # Set a default viewpoint for better visualization
-            vis.get_render_option().background_color = np.asarray([0.1, 0.1, 0.1])
-            vis.get_render_option().point_size = 2.0
+            # Use a light gray background for better visibility
+            vis.get_render_option().background_color = np.asarray([0.8, 0.8, 0.8])  # Light gray
+            vis.get_render_option().point_size = 3.0  # Larger points
+            
+            # Debugging camera info
+            logger.info(f"Camera configured: zoom={zoom}, looking at center={bbox.get_center()}")
             
             # Render
             vis.poll_events()
@@ -203,11 +226,19 @@ class DepthReconstructor:
             image = vis.capture_screen_float_buffer(do_render=True)
             vis.destroy_window()
             
-            return np.asarray(image)
+            # Check if the image is all black (or very dark)
+            img_array = np.asarray(image)
+            if img_array.mean() < 0.1:  # If mean pixel value is very low (almost black)
+                logger.warning("Rendered image appears to be all black, creating a fallback")
+                # Create a fallback with a message
+                fallback_img = np.ones((height, width, 3), dtype=np.float32) * 0.8  # Light gray
+                return fallback_img
+                
+            return img_array
         except Exception as e:
             logger.warning(f"Error rendering point cloud: {str(e)}")
-            # Create a fallback image with text
-            fallback_img = np.ones((height, width, 3), dtype=np.float32) * 0.1
+            # Create a fallback image with a light background
+            fallback_img = np.ones((height, width, 3), dtype=np.float32) * 0.8  # Light gray
             return fallback_img
     
     def render_mesh_image(self, mesh: o3d.geometry.TriangleMesh, 
@@ -225,6 +256,15 @@ class DepthReconstructor:
         Returns:
             Rendered image as numpy array
         """
+        # Debug information
+        logger.info(f"Rendering mesh with {len(mesh.triangles)} triangles")
+        
+        # Check if mesh is valid
+        if len(mesh.triangles) == 0:
+            logger.warning("Mesh is empty (no triangles), creating a message image instead")
+            fallback_img = np.ones((height, width, 3), dtype=np.float32) * 0.8  # Light gray
+            return fallback_img
+            
         vis = o3d.visualization.Visualizer()
         vis.create_window(visible=False, width=width, height=height)
         vis.add_geometry(mesh)
@@ -233,11 +273,26 @@ class DepthReconstructor:
         try:
             view_control = vis.get_view_control()
             if view_control is not None:
-                view_control.set_zoom(zoom)
+                # Position the camera to see the entire mesh
+                camera_params = view_control.convert_to_pinhole_camera_parameters()
                 
-            # Set a default viewpoint for better visualization
-            vis.get_render_option().background_color = np.asarray([0.1, 0.1, 0.1])
+                # Get the bounding box of the mesh
+                bbox = mesh.get_axis_aligned_bounding_box()
+                center = bbox.get_center()
+                
+                # Set a reasonable default viewpoint
+                view_control.set_front([0, 0, -1])  # Look at the model from the front
+                view_control.set_up([0, -1, 0])     # Up direction
+                view_control.set_lookat(center)     # Look at the center of the model
+                view_control.set_zoom(zoom)
+            
+            # Use a light gray background for better visibility
+            vis.get_render_option().background_color = np.asarray([0.8, 0.8, 0.8])  # Light gray
             vis.get_render_option().mesh_show_back_face = True
+            vis.get_render_option().light_on = True
+            
+            # Debugging camera info
+            logger.info(f"Mesh camera configured: zoom={zoom}, looking at center={bbox.get_center()}")
             
             # Render
             vis.poll_events()
@@ -245,9 +300,26 @@ class DepthReconstructor:
             image = vis.capture_screen_float_buffer(do_render=True)
             vis.destroy_window()
             
-            return np.asarray(image)
+            # Check if the image is all black (or very dark)
+            img_array = np.asarray(image)
+            if img_array.mean() < 0.1:  # If mean pixel value is very low (almost black)
+                logger.warning("Rendered mesh image appears to be all black, creating a fallback")
+                
+                # Add a white grid pattern to gray background to show something
+                fallback_img = np.ones((height, width, 3), dtype=np.float32) * 0.8  # Light gray
+                
+                # Create mesh texture visualization
+                for i in range(0, height, 20):
+                    for j in range(0, width, 20):
+                        # Create a grid pattern
+                        if (i + j) % 40 == 0:
+                            fallback_img[i:i+10, j:j+10] = [0.9, 0.9, 0.9]  # Make squares lighter
+                
+                return fallback_img
+                
+            return img_array
         except Exception as e:
             logger.warning(f"Error rendering mesh: {str(e)}")
-            # Create a fallback image with text
-            fallback_img = np.ones((height, width, 3), dtype=np.float32) * 0.1
+            # Create a fallback image with a light background
+            fallback_img = np.ones((height, width, 3), dtype=np.float32) * 0.8  # Light gray
             return fallback_img
