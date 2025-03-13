@@ -64,6 +64,14 @@ Run the Gradio interface:
 python interior_reimaginer/main.py
 ```
 
+This will start the application and generate both a local URL (http://127.0.0.1:7860) and a public shareable link that you can use to access the interface from other devices. The shareable link will be displayed in the console.
+
+If you don't want to create a public link, use:
+
+```bash
+python interior_reimaginer/main.py --share=False
+```
+
 ### Google Colab Usage
 
 For running in Google Colab, you can use our example notebook:
