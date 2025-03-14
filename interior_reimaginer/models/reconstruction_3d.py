@@ -245,6 +245,288 @@ class DepthReconstructor:
             # Fall back to a simple depth map visualization
             return self.render_depth_map(depth_map, width=width, height=height)
     
+    def render_solid_pointcloud_plotly(self, depth_map: np.ndarray, image: Image.Image,
+                                     width: int = 800, height: int = 600,
+                                     downsample_factor: int = 4, 
+                                     solid_mode: str = "mesh") -> np.ndarray:
+        """
+        Render a solid-looking 3D visualization using Plotly, filling in gaps between points.
+        
+        Args:
+            depth_map: Depth map as numpy array
+            image: Original color image
+            width: Desired output width
+            height: Desired output height
+            downsample_factor: Factor by which to downsample the point cloud
+            solid_mode: Method to create solid appearance. Options:
+                        "mesh" (Delaunay triangulation)
+                        "dense" (smaller, denser points)
+                        "surface" (interpolated surface)
+            
+        Returns:
+            Rendered solid visualization as numpy array
+        """
+        logger.info(f"Rendering solid point cloud with Plotly (mode={solid_mode}, downsample={downsample_factor})")
+        
+        try:
+            # Normalize depth map
+            if depth_map.max() <= 255:
+                depth_norm = depth_map.astype(np.float32) / 255.0
+            else:
+                depth_norm = depth_map.astype(np.float32) / 1000.0
+
+            # Get color image as RGB numpy array
+            color_img = np.array(image.convert('RGB'))
+            
+            # Ensure dimensions match
+            if color_img.shape[:2] != depth_map.shape[:2]:
+                color_img = cv2.resize(color_img, (depth_map.shape[1], depth_map.shape[0]))
+            
+            # Downsample for better performance (adjust based on mode)
+            actual_downsample = downsample_factor
+            if solid_mode == "dense":
+                # Use smaller downsample factor for dense mode to get more points
+                actual_downsample = max(1, downsample_factor // 2)
+            
+            h, w = depth_norm.shape
+            y_indices, x_indices = np.mgrid[0:h:actual_downsample, 0:w:actual_downsample]
+            
+            # Get 3D coordinates
+            z = depth_norm[y_indices, x_indices]
+            x = x_indices
+            y = y_indices
+            colors = color_img[y_indices, x_indices]
+            
+            # Flatten arrays for plotting
+            x_flat = x.flatten()
+            y_flat = y.flatten()
+            z_flat = z.flatten()
+            
+            # Filter out invalid points
+            valid = (z_flat > 0)
+            x_flat = x_flat[valid]
+            y_flat = y_flat[valid]
+            z_flat = z_flat[valid]
+            
+            # Normalize spatial coordinates
+            x_norm = (x_flat - w/2) / w
+            y_norm = -(y_flat - h/2) / h  # Invert Y axis for correct orientation
+            
+            # Extract RGB values from the image for Plotly
+            r = colors[..., 0].flatten()[valid]
+            g = colors[..., 1].flatten()[valid]
+            b = colors[..., 2].flatten()[valid]
+            
+            # Different visualization approaches based on mode
+            if solid_mode == "mesh":
+                # Use Delaunay triangulation to create a mesh
+                try:
+                    from scipy.spatial import Delaunay
+                    
+                    # Create a 2D points array for triangulation (using x and -y as coordinates)
+                    points_2d = np.vstack([x_norm, z_flat]).T
+                    
+                    # Create Delaunay triangulation
+                    # We'll filter out problematic triangles later
+                    tri = Delaunay(points_2d)
+                    
+                    # Get simplices (triangles)
+                    simplices = tri.simplices
+                    
+                    # Filter out long/problematic triangles
+                    # Compute edge lengths for each triangle
+                    max_edge_lengths = []
+                    valid_simplices = []
+                    
+                    for simplex in simplices:
+                        p1, p2, p3 = simplex
+                        # Get the 3D coordinates
+                        pts = np.array([
+                            [x_norm[p1], z_flat[p1], -y_norm[p1]],
+                            [x_norm[p2], z_flat[p2], -y_norm[p2]],
+                            [x_norm[p3], z_flat[p3], -y_norm[p3]]
+                        ])
+                        
+                        # Calculate edge lengths
+                        edges = np.array([
+                            np.linalg.norm(pts[1] - pts[0]),
+                            np.linalg.norm(pts[2] - pts[1]),
+                            np.linalg.norm(pts[0] - pts[2])
+                        ])
+                        
+                        max_edge = np.max(edges)
+                        max_edge_lengths.append(max_edge)
+                        
+                        # Also check depth discontinuity - if z values differ too much, it's not a valid triangle
+                        z_vals = np.array([z_flat[p1], z_flat[p2], z_flat[p3]])
+                        z_range = np.max(z_vals) - np.min(z_vals)
+                        
+                        # Only keep triangles with reasonable edge lengths and z_range
+                        edge_threshold = 0.1  # Adjust based on your normalized scale
+                        depth_threshold = 0.1  # Adjust based on scene depth range
+                        
+                        if max_edge < edge_threshold and z_range < depth_threshold:
+                            valid_simplices.append(simplex)
+                    
+                    # Calculate vertex colors as average of RGB
+                    i, j, k = np.array(valid_simplices).T
+                    
+                    # Create intensity values for coloring
+                    intensity = np.zeros(len(x_norm))
+                    for idx in range(len(x_norm)):
+                        # Use normalized RGB values for intensity
+                        intensity[idx] = (r[idx]/255 + g[idx]/255 + b[idx]/255) / 3
+                    
+                    # Create mesh3d with triangulation
+                    mesh = go.Mesh3d(
+                        x=x_norm, 
+                        y=z_flat,  # Use z for y-axis (depth)
+                        z=-y_norm,  # Negative y for correct orientation
+                        i=i, j=j, k=k,
+                        intensity=intensity,
+                        colorscale='Viridis',
+                        opacity=0.9,
+                        intensitymode='vertex'
+                    )
+                    
+                    # Create a scatter plot for points on top of the mesh for better coloring
+                    scatter = go.Scatter3d(
+                        x=x_norm,
+                        y=z_flat,
+                        z=-y_norm,
+                        mode='markers',
+                        marker=dict(
+                            size=1.5,
+                            color=[f'rgb({r[i]},{g[i]},{b[i]})' for i in range(len(r))],
+                            opacity=0.7
+                        ),
+                        showlegend=False
+                    )
+                    
+                    # Create the 3D scatter plot with both mesh and points
+                    fig = go.Figure(data=[mesh, scatter])
+                    
+                except Exception as tri_err:
+                    logger.warning(f"Triangulation failed: {str(tri_err)}, falling back to dense points")
+                    solid_mode = "dense"  # Fall back to dense points
+            
+            if solid_mode == "surface":
+                # Create a surface plot by gridding the data
+                try:
+                    # Create a grid of points for the surface
+                    grid_size = 100  # Higher for more detail, lower for better performance
+                    
+                    from scipy.interpolate import griddata
+                    
+                    # Create grid coordinates
+                    xi = np.linspace(min(x_norm), max(x_norm), grid_size)
+                    yi = np.linspace(min(z_flat), max(z_flat), grid_size)
+                    X, Y = np.meshgrid(xi, yi)
+                    
+                    # Interpolate Z values
+                    Z = griddata((x_norm, z_flat), -y_norm, (X, Y), method='linear', fill_value=np.min(-y_norm))
+                    
+                    # Interpolate colors to the grid (for each channel)
+                    R = griddata((x_norm, z_flat), r, (X, Y), method='linear', fill_value=0)
+                    G = griddata((x_norm, z_flat), g, (X, Y), method='linear', fill_value=0)
+                    B = griddata((x_norm, z_flat), b, (X, Y), method='linear', fill_value=0)
+                    
+                    # Create RGB color strings for each grid point
+                    colors_grid = []
+                    for i in range(grid_size):
+                        row = []
+                        for j in range(grid_size):
+                            r_val = max(0, min(255, int(R[i, j])))
+                            g_val = max(0, min(255, int(G[i, j])))
+                            b_val = max(0, min(255, int(B[i, j])))
+                            row.append(f'rgb({r_val},{g_val},{b_val})')
+                        colors_grid.append(row)
+                    
+                    # Create surface plot
+                    surface = go.Surface(
+                        x=X,
+                        y=Y,
+                        z=Z,
+                        surfacecolor=np.sqrt(R**2 + G**2 + B**2),  # Use magnitude as color
+                        colorscale='Viridis',
+                        opacity=0.9,
+                        showscale=False
+                    )
+                    
+                    # Add points for better coloring
+                    scatter = go.Scatter3d(
+                        x=x_norm,
+                        y=z_flat,
+                        z=-y_norm,
+                        mode='markers',
+                        marker=dict(
+                            size=1.5,
+                            color=[f'rgb({r[i]},{g[i]},{b[i]})' for i in range(len(r))],
+                            opacity=0.5
+                        ),
+                        showlegend=False
+                    )
+                    
+                    fig = go.Figure(data=[surface, scatter])
+                    
+                except Exception as surf_err:
+                    logger.warning(f"Surface creation failed: {str(surf_err)}, falling back to dense points")
+                    solid_mode = "dense"  # Fall back to dense points
+            
+            if solid_mode == "dense":
+                # Use smaller markers with more points for a denser appearance
+                color_strs = [f'rgb({r[i]},{g[i]},{b[i]})' for i in range(len(r))]
+                
+                # Create the 3D scatter plot with optimized marker properties
+                scatter = go.Scatter3d(
+                    x=x_norm,
+                    y=z_flat,  # Use z for y-axis (depth)
+                    z=-y_norm,  # Negative y for correct orientation
+                    mode='markers',
+                    marker=dict(
+                        size=3,  # Use larger points
+                        color=color_strs,
+                        opacity=1.0,  # Full opacity for solid appearance
+                        symbol='circle',
+                    )
+                )
+                
+                fig = go.Figure(data=[scatter])
+            
+            # Set layout for better visualization
+            fig.update_layout(
+                width=width,
+                height=height,
+                scene=dict(
+                    xaxis_title='X',
+                    yaxis_title='Z (Depth)',
+                    zaxis_title='Y',
+                    aspectratio=dict(x=1, y=1, z=1),
+                    camera=dict(
+                        eye=dict(x=1.2, y=1.2, z=1.2),
+                        up=dict(x=0, y=0, z=1)
+                    ),
+                    xaxis=dict(showgrid=False, zeroline=False),
+                    yaxis=dict(showgrid=False, zeroline=False),
+                    zaxis=dict(showgrid=False, zeroline=False)
+                ),
+                margin=dict(l=0, r=0, b=0, t=0),
+                paper_bgcolor='rgb(240, 240, 240)',
+                plot_bgcolor='rgb(240, 240, 240)'
+            )
+            
+            # Render to image
+            img_bytes = fig.to_image(format="png")
+            img = np.array(Image.open(io.BytesIO(img_bytes)))
+            
+            # Convert to float32 and normalize
+            return img.astype(np.float32) / 255.0
+            
+        except Exception as e:
+            logger.warning(f"Error rendering solid point cloud with Plotly: {str(e)}")
+            # Fall back to regular point cloud rendering
+            return self.render_pointcloud_plotly(depth_map, image, width, height, downsample_factor)
+            
     def render_pointcloud_plotly(self, depth_map: np.ndarray, image: Image.Image,
                                width: int = 800, height: int = 600,
                                downsample_factor: int = 4) -> np.ndarray:
@@ -310,16 +592,16 @@ class DepthReconstructor:
             # Create color strings in 'rgb(r,g,b)' format
             color_strs = [f'rgb({r[i]},{g[i]},{b[i]})' for i in range(len(r))]
             
-            # Create the 3D scatter plot
+            # Create the 3D scatter plot with optimized marker properties
             fig = go.Figure(data=[go.Scatter3d(
                 x=x,
                 y=z,  # Use z for y-axis (depth)
                 z=-y,  # Negative y for correct orientation
                 mode='markers',
                 marker=dict(
-                    size=2,
+                    size=3,  # Increased from 2 to 3
                     color=color_strs,
-                    opacity=0.8
+                    opacity=0.9  # Increased from 0.8 to 0.9
                 )
             )])
             
@@ -902,7 +1184,8 @@ class DepthReconstructor:
     def enhanced_reconstruction(self, depth_map: np.ndarray, image: Image.Image,
                               width: int = 800, height: int = 600,
                               downsample_factor: int = 2,
-                              use_gan: bool = True) -> Tuple[np.ndarray, o3d.geometry.PointCloud]:
+                              use_gan: bool = True,
+                              solid_rendering: bool = True) -> Tuple[np.ndarray, o3d.geometry.PointCloud]:
         """
         Create an enhanced 3D reconstruction using GAN-based refinement, depth gradient analysis, 
         confidence-based filtering, and advanced rendering approaches.
@@ -1004,16 +1287,27 @@ class DepthReconstructor:
             # Use Plotly as the primary 3D visualization method
             render_img = None
                 
-            # Attempt to render with Plotly
+            # Attempt to render with Plotly - solid mode
             try:
-                logger.info("Attempting 3D rendering with Plotly")
-                render_img = self.render_pointcloud_plotly(
-                    filtered_depth, 
-                    image, 
-                    width=width, 
-                    height=height, 
-                    downsample_factor=downsample_factor
-                )
+                if solid_rendering:
+                    logger.info("Attempting 3D rendering with Solid Plotly")
+                    render_img = self.render_solid_pointcloud_plotly(
+                        filtered_depth, 
+                        image, 
+                        width=width, 
+                        height=height, 
+                        downsample_factor=downsample_factor,
+                        solid_mode="mesh"  # Try mesh mode first for best solid appearance
+                    )
+                else:
+                    logger.info("Attempting 3D rendering with standard Plotly")
+                    render_img = self.render_pointcloud_plotly(
+                        filtered_depth, 
+                        image, 
+                        width=width, 
+                        height=height, 
+                        downsample_factor=downsample_factor
+                    )
                 
                 # Validate the rendered image
                 mean_value = render_img.mean()
@@ -1098,7 +1392,8 @@ class DepthReconstructor:
                           width: int = 800, height: int = 600,
                           downsample_factor: int = 2,
                           patch_size: int = 32,
-                          overlap: int = 8) -> Tuple[np.ndarray, o3d.geometry.PointCloud]:
+                          overlap: int = 8,
+                          solid_rendering: bool = True) -> Tuple[np.ndarray, o3d.geometry.PointCloud]:
         """
         Create a 3D reconstruction using the Local Region Models (LRM) approach.
         This divides the depth map into overlapping patches and processes each 
@@ -1245,16 +1540,27 @@ class DepthReconstructor:
             
             logger.info(f"Final point cloud has {len(combined_pcd.points)} points")
             
-            # Try to render with Plotly first
+            # Try to render with Plotly first - solid mode
             try:
-                logger.info("Attempting Plotly rendering for LRM reconstruction")
-                render_img = self.render_pointcloud_plotly(
-                    depth_map,
-                    image,
-                    width=width,
-                    height=height,
-                    downsample_factor=max(1, downsample_factor)
-                )
+                if solid_rendering:
+                    logger.info("Attempting Solid Plotly rendering for LRM reconstruction")
+                    render_img = self.render_solid_pointcloud_plotly(
+                        depth_map,
+                        image,
+                        width=width,
+                        height=height,
+                        downsample_factor=max(1, downsample_factor),
+                        solid_mode="dense"  # Use dense mode for LRM which tends to have more detailed points
+                    )
+                else:
+                    logger.info("Attempting standard Plotly rendering for LRM reconstruction")
+                    render_img = self.render_pointcloud_plotly(
+                        depth_map,
+                        image,
+                        width=width,
+                        height=height,
+                        downsample_factor=max(1, downsample_factor)
+                    )
                 logger.info("Successfully rendered LRM result with Plotly")
             except Exception as e:
                 logger.warning(f"Plotly rendering failed: {str(e)}")
@@ -1366,7 +1672,8 @@ class DepthReconstructor:
                         depth_map=depth_map,
                         image=image,
                         width=width,
-                        height=height
+                        height=height,
+                        solid_rendering=True
                     )
                     return render_img
                 except Exception as e:
@@ -1390,7 +1697,8 @@ class DepthReconstructor:
                         height=height,
                         downsample_factor=2,
                         patch_size=32,
-                        overlap=8
+                        overlap=8,
+                        solid_rendering=True
                     )
                     return render_img
                 except Exception as e:
