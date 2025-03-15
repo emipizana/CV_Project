@@ -1053,11 +1053,18 @@ class DepthReconstructor:
             # For enhanced 3D, use a moderate downsampling for detail
             # For this method, the normal render_pointcloud_plotly works fine
             return self.render_pointcloud_plotly(depth_map, image, width, height, downsample_factor=2)
-        elif method == "diffusion_3d" or method == "lrm_3d":
-            # For diffusion and LRM, use the special renderer with correct orientation
-            # These methods need the modified renderer to prevent upside-down images
-            downsample = 3 if method == "diffusion_3d" else 4
-            return self._render_custom_pointcloud_for_lrm(depth_map, image, width, height, downsample_factor=downsample)
+        elif method == "diffusion_3d":
+            # Apply diffusion enhancement first
+            try:
+                logger.info("Applying diffusion enhancement before visualization")
+                enhanced_depth = self.enhance_depth_with_diffusion(depth_map, image)
+                return self._render_custom_pointcloud_for_lrm(enhanced_depth, image, width, height, downsample_factor=3)
+            except Exception as e:
+                logger.error(f"Failed to apply diffusion enhancement: {e}, falling back to original depth")
+                return self._render_custom_pointcloud_for_lrm(depth_map, image, width, height, downsample_factor=3)
+        elif method == "lrm_3d":
+            # LRM method uses special renderer with correct orientation
+            return self._render_custom_pointcloud_for_lrm(depth_map, image, width, height, downsample_factor=4)
         else:
             # Default to point cloud if method not recognized
             logger.warning(f"Unknown visualization method: {method}, falling back to 3D point cloud")
