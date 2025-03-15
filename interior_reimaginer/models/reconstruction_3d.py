@@ -590,7 +590,7 @@ class DepthReconstructor:
             
             # Normalize spatial coordinates
             x_norm = (x_flat - w/2) / w
-            y_norm = -(y_flat - h/2) / h  # Invert Y axis for correct orientation
+            y_norm = (y_flat - h/2) / h  # Invert Y axis for correct orientation #Inverted to positive
             
             # Extract RGB values from the image for Plotly
             r = colors[..., 0].flatten()[valid]
@@ -674,7 +674,7 @@ class DepthReconstructor:
                     scatter = go.Scatter3d(
                         x=x_norm,
                         y=z_flat,
-                        z=-y_norm,
+                        z=y_norm, #Changed to positive
                         mode='markers',
                         marker=dict(
                             size=1.5,
@@ -738,7 +738,7 @@ class DepthReconstructor:
                     scatter = go.Scatter3d(
                         x=x_norm,
                         y=z_flat,
-                        z=-y_norm,
+                        z=y_norm, #changed to positive
                         mode='markers',
                         marker=dict(
                             size=1.5,
@@ -762,7 +762,7 @@ class DepthReconstructor:
                 scatter = go.Scatter3d(
                     x=x_norm,
                     y=z_flat,  # Use z for y-axis (depth)
-                    z=-y_norm,  # Negative y for correct orientation
+                    z=y_norm,  # Negative y for correct orientation #changed to positive
                     mode='markers',
                     marker=dict(
                         size=3,  # Use larger points
