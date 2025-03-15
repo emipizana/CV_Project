@@ -17,7 +17,7 @@ from torchvision import transforms
 import math
 
 # Import lightweight diffusion model
-from interior_reimaginer.models.lightweight_diffusion import LightweightDiffusionModel, DepthDiffusionLightweight
+from .lightweight_diffusion import LightweightDiffusionModel, DepthDiffusionLightweight
 
 logger = logging.getLogger(__name__)
 
