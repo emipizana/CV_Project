@@ -1,504 +1,396 @@
-import os
-import numpy as np
-import matplotlib.pyplot as plt
-from PIL import Image
-import cv2
-import logging
-from typing import List, Dict, Tuple, Optional, Union
-import torch
+"""
+Depth Map Comparison Module
 
-logger = logging.getLogger(__name__)
+This module provides tools for comparing different depth map enhancement methods,
+including original depth maps, GAN-enhanced depth maps, and diffusion-enhanced depth maps.
+"""
+
+import numpy as np
+import cv2
+from PIL import Image
+import matplotlib.pyplot as plt
+from typing import Optional, Tuple, Union
+import os
 
 class DepthMapComparison:
     """
-    Class for creating grid visualizations to compare different depth map enhancement methods.
-    
-    This class provides functionality to:
-    1. Generate side-by-side comparisons of original, GAN-enhanced, and diffusion-enhanced depth maps
-    2. Visualize the differences between enhancement methods
-    3. Create publication-ready grid visualizations
+    A class for comparing and visualizing different depth map enhancement methods.
     """
     
     def __init__(self, depth_reconstructor=None):
         """
-        Initialize the DepthMapComparison module.
+        Initialize the depth map comparison tool.
         
         Args:
-            depth_reconstructor: Optional DepthReconstructor instance. If provided, 
-                                will use this instance for depth enhancement methods.
+            depth_reconstructor: A DepthReconstructor instance (optional)
         """
         self.depth_reconstructor = depth_reconstructor
-        logger.info("Initializing Depth Map Comparison module")
     
-    def create_comparison_grid(self, 
-                             original_depth: np.ndarray,
-                             rgb_image: Image.Image,
-                             width: int = 1200,
-                             height: int = 400,
-                             colormap: int = cv2.COLORMAP_INFERNO,
-                             titles: List[str] = None) -> np.ndarray:
+    def normalize_depth_map(self, depth_map: np.ndarray) -> np.ndarray:
         """
-        Create a comparison grid showing original, GAN-enhanced, and diffusion-enhanced depth maps.
+        Normalize a depth map to the range 0-255.
         
         Args:
-            original_depth: Original depth map as numpy array
-            rgb_image: Original RGB image corresponding to the depth map
-            width: Total width of the output grid
-            height: Height of the output grid
-            colormap: OpenCV colormap to use for depth visualization
-            titles: List of titles for each column (default: ["Original", "GAN-Enhanced", "Diffusion-Enhanced"])
+            depth_map: Raw depth map array
             
         Returns:
-            Visualization grid as numpy array (RGB)
+            Normalized depth map as uint8
         """
-        logger.info("Creating depth map comparison grid")
+        if depth_map.dtype == np.float32 or depth_map.dtype == np.float64:
+            # Handle float depth maps (typically 0-1 range)
+            normalized = (depth_map - np.min(depth_map)) / (np.max(depth_map) - np.min(depth_map)) * 255
+        else:
+            # Handle integer depth maps
+            normalized = (depth_map.astype(np.float32) - np.min(depth_map)) / (np.max(depth_map) - np.min(depth_map)) * 255
         
-        # Set default titles if not provided
-        if titles is None:
-            titles = ["Original", "GAN-Enhanced", "Diffusion-Enhanced"]
+        return normalized.astype(np.uint8)
+    
+    def apply_colormap(self, depth_map: np.ndarray, colormap: int = cv2.COLORMAP_INFERNO) -> np.ndarray:
+        """
+        Apply a colormap to a depth map for better visualization.
         
-        # Check if original depth is valid
-        if original_depth is None or original_depth.size == 0:
-            logger.warning("Invalid original depth map")
-            # Create an error image
-            error_img = np.ones((height, width, 3), dtype=np.uint8) * 200
-            cv2.putText(
-                error_img, 
-                "Invalid depth map provided", 
-                (width // 3, height // 2), 
-                cv2.FONT_HERSHEY_SIMPLEX, 
-                1.0, 
-                (0, 0, 0), 
-                2
-            )
-            return error_img
+        Args:
+            depth_map: Depth map array
+            colormap: OpenCV colormap constant (default: COLORMAP_INFERNO)
+            
+        Returns:
+            Colorized depth map
+        """
+        # Ensure depth map is normalized to 0-255 range
+        normalized_depth = self.normalize_depth_map(depth_map)
         
-        if rgb_image is None:
-            logger.warning("No RGB image provided, creating grayscale placeholder")
-            # Create a grayscale placeholder image with the same dimensions as the depth map
-            rgb_array = np.zeros((original_depth.shape[0], original_depth.shape[1], 3), dtype=np.uint8)
-            rgb_array[..., 0] = 128
-            rgb_array[..., 1] = 128
-            rgb_array[..., 2] = 128
-            rgb_image = Image.fromarray(rgb_array)
+        # Apply colormap
+        colored_depth = cv2.applyColorMap(normalized_depth, colormap)
         
-        # Convert RGB image to numpy array if it's a PIL image
+        # Convert from BGR to RGB (OpenCV uses BGR by default)
+        colored_depth_rgb = cv2.cvtColor(colored_depth, cv2.COLOR_BGR2RGB)
+        
+        return colored_depth_rgb
+        
+    def create_comparison_grid(
+        self, 
+        original_depth: np.ndarray, 
+        rgb_image: Union[np.ndarray, Image.Image], 
+        width: int = 1200, 
+        height: int = 400, 
+        colormap: int = cv2.COLORMAP_INFERNO
+    ) -> np.ndarray:
+        """
+        Create a side-by-side comparison grid of original, GAN-enhanced, and diffusion-enhanced depth maps.
+        
+        Args:
+            original_depth: Original depth map array
+            rgb_image: RGB image corresponding to the depth map (PIL Image or numpy array)
+            width: Width of the output comparison grid
+            height: Height of the output comparison grid
+            colormap: OpenCV colormap constant to use for depth visualization
+            
+        Returns:
+            Comparison grid as a numpy array
+        """
+        # Convert PIL Image to numpy array if needed
         if isinstance(rgb_image, Image.Image):
             rgb_array = np.array(rgb_image)
         else:
             rgb_array = rgb_image
-            
-        # Resize RGB if dimensions don't match
-        if rgb_array.shape[:2] != original_depth.shape[:2]:
-            rgb_array = cv2.resize(rgb_array, (original_depth.shape[1], original_depth.shape[0]))
-            
-        # Calculate individual cell size
-        cell_width = width // 3
-        cell_height = height
         
-        # Create output image
-        output_grid = np.ones((height, width, 3), dtype=np.uint8) * 255
-        
-        # Step 1: Create original depth visualization
-        try:
-            original_viz = self._visualize_depth(
-                depth_map=original_depth,
-                width=cell_width,
-                height=cell_height,
-                colormap=colormap
-            )
-            # Place in first column
-            output_grid[:cell_height, 0:cell_width] = original_viz
-        except Exception as e:
-            logger.error(f"Error visualizing original depth: {e}")
-            # Create error message in the cell
-            cv2.putText(
-                output_grid[:cell_height, 0:cell_width], 
-                "Error visualizing", 
-                (10, cell_height // 2), 
-                cv2.FONT_HERSHEY_SIMPLEX, 
-                0.7, 
-                (0, 0, 0), 
-                1
-            )
-        
-        # Step 2: Generate and visualize GAN-enhanced depth
-        try:
-            if self.depth_reconstructor is not None:
-                logger.info("Generating GAN-enhanced depth map")
-                gan_depth = self.depth_reconstructor.enhance_depth_with_gan(
-                    depth_map=original_depth,
-                    image=rgb_image
-                )
+        # Generate enhanced depth maps using the reconstructor
+        # Fallback to original if enhancement fails or reconstructor not available
+        if self.depth_reconstructor is not None:
+            try:
+                gan_depth = self.depth_reconstructor.enhance_depth_with_gan(original_depth, rgb_image)
+            except Exception as e:
+                print(f"Warning: GAN enhancement failed ({str(e)}). Using original depth map instead.")
+                gan_depth = original_depth
                 
-                # Visualize GAN-enhanced depth
-                gan_viz = self._visualize_depth(
-                    depth_map=gan_depth,
-                    width=cell_width,
-                    height=cell_height,
-                    colormap=colormap
-                )
-                # Place in second column
-                output_grid[:cell_height, cell_width:cell_width*2] = gan_viz
-            else:
-                logger.warning("No depth reconstructor provided, cannot generate GAN-enhanced depth")
-                # Create a message in the cell
-                cv2.putText(
-                    output_grid[:cell_height, cell_width:cell_width*2], 
-                    "No GAN model available", 
-                    (10, cell_height // 2), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 
-                    0.7, 
-                    (0, 0, 0), 
-                    1
-                )
-        except Exception as e:
-            logger.error(f"Error generating GAN-enhanced depth: {e}")
-            # Create error message in the cell
-            cv2.putText(
-                output_grid[:cell_height, cell_width:cell_width*2], 
-                f"GAN error: {type(e).__name__}", 
-                (10, cell_height // 2), 
-                cv2.FONT_HERSHEY_SIMPLEX, 
-                0.7, 
-                (0, 0, 0), 
-                1
-            )
+            try:
+                diffusion_depth = self.depth_reconstructor.enhance_depth_with_diffusion(original_depth, rgb_image)
+            except Exception as e:
+                print(f"Warning: Diffusion enhancement failed ({str(e)}). Using original depth map instead.")
+                diffusion_depth = original_depth
+        else:
+            print("Warning: No depth reconstructor provided. Using original depth map for all visualizations.")
+            gan_depth = original_depth
+            diffusion_depth = original_depth
         
-        # Step 3: Generate and visualize Diffusion-enhanced depth
-        try:
-            if self.depth_reconstructor is not None:
-                logger.info("Generating Diffusion-enhanced depth map")
-                diffusion_depth = self.depth_reconstructor.enhance_depth_with_diffusion(
-                    depth_map=original_depth,
-                    image=rgb_image
-                )
-                
-                # Visualize Diffusion-enhanced depth
-                diffusion_viz = self._visualize_depth(
-                    depth_map=diffusion_depth,
-                    width=cell_width,
-                    height=cell_height,
-                    colormap=colormap
-                )
-                # Place in third column
-                output_grid[:cell_height, cell_width*2:width] = diffusion_viz
-            else:
-                logger.warning("No depth reconstructor provided, cannot generate Diffusion-enhanced depth")
-                # Create a message in the cell
-                cv2.putText(
-                    output_grid[:cell_height, cell_width*2:width], 
-                    "No Diffusion model available", 
-                    (10, cell_height // 2), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 
-                    0.7, 
-                    (0, 0, 0), 
-                    1
-                )
-        except Exception as e:
-            logger.error(f"Error generating Diffusion-enhanced depth: {e}")
-            # Create error message in the cell
-            cv2.putText(
-                output_grid[:cell_height, cell_width*2:width], 
-                f"Diffusion error: {type(e).__name__}", 
-                (10, cell_height // 2), 
-                cv2.FONT_HERSHEY_SIMPLEX, 
-                0.7, 
-                (0, 0, 0), 
-                1
-            )
+        # Apply colormap to depth maps
+        original_colored = self.apply_colormap(original_depth, colormap)
+        gan_colored = self.apply_colormap(gan_depth, colormap)
+        diffusion_colored = self.apply_colormap(diffusion_depth, colormap)
+        
+        # Resize RGB image to match depth visualizations
+        single_width = width // 3
+        single_height = height
+        rgb_resized = cv2.resize(rgb_array, (single_width, single_height))
+        
+        # Resize depth visualizations
+        original_resized = cv2.resize(original_colored, (single_width, single_height))
+        gan_resized = cv2.resize(gan_colored, (single_width, single_height))
+        diffusion_resized = cv2.resize(diffusion_colored, (single_width, single_height))
+        
+        # Create comparison grid
+        comparison = np.zeros((single_height, width, 3), dtype=np.uint8)
+        
+        # Add title text to each section
+        title_height = 30
+        title_font = cv2.FONT_HERSHEY_SIMPLEX
+        title_scale = 0.8
+        title_thickness = 2
+        title_color = (255, 255, 255)
+        
+        # Create blank space for titles
+        comparison = np.zeros((single_height + title_height, width, 3), dtype=np.uint8)
         
         # Add titles
-        title_y_pos = 30  # Y position for the title text
-        font_size = 0.8
-        font_thickness = 2
+        cv2.putText(comparison, "Original Depth Map", (single_width//2 - 100, 25), 
+                   title_font, title_scale, title_color, title_thickness)
+        cv2.putText(comparison, "GAN-Enhanced Depth Map", (single_width + single_width//2 - 120, 25), 
+                   title_font, title_scale, title_color, title_thickness)
+        cv2.putText(comparison, "Diffusion-Enhanced Depth Map", (2*single_width + single_width//2 - 140, 25), 
+                   title_font, title_scale, title_color, title_thickness)
         
-        for i, title in enumerate(titles[:3]):  # Ensure we only use up to 3 titles
-            x_pos = cell_width * i + (cell_width // 2 - 70)  # Center the title
-            cv2.putText(
-                output_grid, 
-                title, 
-                (x_pos, title_y_pos), 
-                cv2.FONT_HERSHEY_SIMPLEX, 
-                font_size, 
-                (0, 0, 0), 
-                font_thickness
-            )
+        # Place images in grid
+        comparison[title_height:, 0:single_width] = original_resized
+        comparison[title_height:, single_width:2*single_width] = gan_resized
+        comparison[title_height:, 2*single_width:] = diffusion_resized
         
-        return output_grid
+        return comparison
     
-    def _visualize_depth(self, 
-                         depth_map: np.ndarray, 
-                         width: int = 400, 
-                         height: int = 400, 
-                         colormap: int = cv2.COLORMAP_INFERNO) -> np.ndarray:
+    def compute_depth_difference(self, original_depth: np.ndarray, enhanced_depth: np.ndarray) -> np.ndarray:
         """
-        Visualize a depth map using OpenCV's colormaps.
+        Compute the absolute difference between original and enhanced depth maps.
         
         Args:
-            depth_map: Depth map as numpy array
-            width: Desired output width
-            height: Desired output height
-            colormap: OpenCV colormap to use
+            original_depth: Original depth map
+            enhanced_depth: Enhanced depth map
             
         Returns:
-            Rendered colorized depth map as numpy array (RGB)
+            Normalized difference map
         """
-        # Ensure depth map is valid
-        if depth_map is None or depth_map.size == 0:
-            logger.warning("Invalid depth map provided to visualizer")
-            return np.ones((height, width, 3), dtype=np.uint8) * 200  # Light gray
-            
-        # Normalize depth map to 0-255 range for visualization
-        if depth_map.max() > 0:
-            normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+        # Normalize both depth maps to 0-1 range for fair comparison
+        if original_depth.dtype != np.float32 and original_depth.dtype != np.float64:
+            orig_norm = original_depth.astype(np.float32) / 255.0
         else:
-            logger.warning("Depth map has no valid depth values")
-            return np.ones((height, width, 3), dtype=np.uint8) * 200  # Light gray
+            orig_norm = original_depth.copy()
+            # Ensure range 0-1
+            if np.max(orig_norm) > 1.0:
+                orig_norm = orig_norm / 255.0
         
-        # Apply colormap
-        colored = cv2.applyColorMap(normalized, colormap)
+        if enhanced_depth.dtype != np.float32 and enhanced_depth.dtype != np.float64:
+            enh_norm = enhanced_depth.astype(np.float32) / 255.0
+        else:
+            enh_norm = enhanced_depth.copy()
+            # Ensure range 0-1
+            if np.max(enh_norm) > 1.0:
+                enh_norm = enh_norm / 255.0
+                
+        # Compute absolute difference
+        diff = np.abs(orig_norm - enh_norm)
         
-        # Resize to desired dimensions
-        if colored.shape[0] != height or colored.shape[1] != width:
-            colored = cv2.resize(colored, (width, height))
+        # Normalize to 0-1 for visualization
+        if np.max(diff) > 0:
+            diff = diff / np.max(diff)
         
-        # Convert to RGB (from BGR)
-        colored_rgb = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
-        
-        return colored_rgb
+        return diff
     
-    def create_detailed_comparison(self,
-                                  original_depth: np.ndarray,
-                                  rgb_image: Image.Image,
-                                  width: int = 1200,
-                                  height: int = 800,
-                                  add_difference_maps: bool = True,
-                                  colormap: int = cv2.COLORMAP_INFERNO) -> np.ndarray:
+    def create_detailed_comparison(
+        self, 
+        original_depth: np.ndarray, 
+        rgb_image: Union[np.ndarray, Image.Image], 
+        width: int = 1200, 
+        height: int = 800, 
+        add_difference_maps: bool = True,
+        colormap: int = cv2.COLORMAP_INFERNO
+    ) -> np.ndarray:
         """
-        Create a detailed comparison grid showing original depth, enhanced versions,
-        and optionally difference maps between the methods.
+        Create a detailed comparison with original image, depth maps, and difference maps.
         
         Args:
-            original_depth: Original depth map as numpy array
-            rgb_image: Original RGB image corresponding to the depth map
-            width: Total width of the output grid
-            height: Height of the output grid
-            add_difference_maps: Whether to include difference maps
-            colormap: OpenCV colormap to use for depth visualization
+            original_depth: Original depth map array
+            rgb_image: RGB image corresponding to the depth map
+            width: Width of the output comparison grid
+            height: Height of the output comparison grid
+            add_difference_maps: Whether to include difference maps in the visualization
+            colormap: OpenCV colormap constant to use for depth visualization
             
         Returns:
-            Detailed visualization grid as numpy array (RGB)
+            Detailed comparison grid as a numpy array
         """
-        logger.info("Creating detailed depth map comparison")
-        
-        # Determine grid layout based on whether to include difference maps
-        if add_difference_maps:
-            # 2x3 grid: top row is depth maps, bottom row is difference maps
-            rows, cols = 2, 3
+        # Convert PIL Image to numpy array if needed
+        if isinstance(rgb_image, Image.Image):
+            rgb_array = np.array(rgb_image)
         else:
-            # 1x3 grid: just depth maps
-            rows, cols = 1, 3
-        
-        # Calculate individual cell size
-        cell_width = width // cols
-        cell_height = height // rows
-        
-        # Create output image
-        output_grid = np.ones((height, width, 3), dtype=np.uint8) * 255
-        
-        # Check if original depth is valid
-        if original_depth is None or original_depth.size == 0:
-            logger.warning("Invalid original depth map")
-            # Create an error image
-            cv2.putText(
-                output_grid, 
-                "Invalid depth map provided", 
-                (width // 3, height // 2), 
-                cv2.FONT_HERSHEY_SIMPLEX, 
-                1.0, 
-                (0, 0, 0), 
-                2
-            )
-            return output_grid
-        
-        if rgb_image is None:
-            logger.warning("No RGB image provided, creating grayscale placeholder")
-            # Create a grayscale placeholder image
-            rgb_array = np.zeros((original_depth.shape[0], original_depth.shape[1], 3), dtype=np.uint8)
-            rgb_array[..., 0] = 128
-            rgb_array[..., 1] = 128
-            rgb_array[..., 2] = 128
-            rgb_image = Image.fromarray(rgb_array)
+            rgb_array = rgb_image
         
         # Generate enhanced depth maps
-        try:
-            if self.depth_reconstructor is not None:
-                gan_depth = self.depth_reconstructor.enhance_depth_with_gan(
-                    depth_map=original_depth,
-                    image=rgb_image
-                )
+        if self.depth_reconstructor is not None:
+            try:
+                gan_depth = self.depth_reconstructor.enhance_depth_with_gan(original_depth, rgb_image)
+            except Exception as e:
+                print(f"Warning: GAN enhancement failed ({str(e)}). Using original depth map instead.")
+                gan_depth = original_depth
                 
-                diffusion_depth = self.depth_reconstructor.enhance_depth_with_diffusion(
-                    depth_map=original_depth,
-                    image=rgb_image
-                )
-            else:
-                # If no depth reconstructor provided, use original depth as fallback
-                logger.warning("No depth reconstructor provided, using original depth as fallback")
-                gan_depth = original_depth.copy()
-                diffusion_depth = original_depth.copy()
-        except Exception as e:
-            logger.error(f"Error generating enhanced depth maps: {e}")
-            # Create an error message
-            cv2.putText(
-                output_grid, 
-                f"Error generating enhanced depth maps: {type(e).__name__}", 
-                (width // 4, height // 2), 
-                cv2.FONT_HERSHEY_SIMPLEX, 
-                0.8, 
-                (0, 0, 0), 
-                1
-            )
-            return output_grid
+            try:
+                diffusion_depth = self.depth_reconstructor.enhance_depth_with_diffusion(original_depth, rgb_image)
+            except Exception as e:
+                print(f"Warning: Diffusion enhancement failed ({str(e)}). Using original depth map instead.")
+                diffusion_depth = original_depth
+        else:
+            print("Warning: No depth reconstructor provided. Using original depth map for all visualizations.")
+            gan_depth = original_depth
+            diffusion_depth = original_depth
         
-        # Create visualizations for each depth map
-        original_viz = self._visualize_depth(
-            depth_map=original_depth,
-            width=cell_width,
-            height=cell_height,
-            colormap=colormap
-        )
-        
-        gan_viz = self._visualize_depth(
-            depth_map=gan_depth,
-            width=cell_width,
-            height=cell_height,
-            colormap=colormap
-        )
-        
-        diffusion_viz = self._visualize_depth(
-            depth_map=diffusion_depth,
-            width=cell_width,
-            height=cell_height,
-            colormap=colormap
-        )
-        
-        # Place depth map visualizations in top row
-        output_grid[:cell_height, 0:cell_width] = original_viz
-        output_grid[:cell_height, cell_width:cell_width*2] = gan_viz
-        output_grid[:cell_height, cell_width*2:width] = diffusion_viz
-        
-        # Add difference maps if requested
-        if add_difference_maps and rows > 1:
-            # Compute difference maps - first normalize to 0-1 range
-            if original_depth.max() > 0:
-                orig_norm = original_depth.astype(np.float32) / original_depth.max()
-            else:
-                orig_norm = original_depth.astype(np.float32)
-                
-            if gan_depth.max() > 0:
-                gan_norm = gan_depth.astype(np.float32) / gan_depth.max()
-            else:
-                gan_norm = gan_depth.astype(np.float32)
-                
-            if diffusion_depth.max() > 0:
-                diff_norm = diffusion_depth.astype(np.float32) / diffusion_depth.max()
-            else:
-                diff_norm = diffusion_depth.astype(np.float32)
+        # Compute difference maps if requested
+        if add_difference_maps:
+            gan_diff = self.compute_depth_difference(original_depth, gan_depth)
+            diffusion_diff = self.compute_depth_difference(original_depth, diffusion_depth)
             
-            # Calculate absolute differences between enhanced maps and original
-            gan_diff = np.abs(gan_norm - orig_norm)
-            diffusion_diff = np.abs(diff_norm - orig_norm)
+            # Apply heat colormap to difference maps (red = more difference)
+            gan_diff_colored = self.apply_colormap(gan_diff * 255, cv2.COLORMAP_HOT)
+            diffusion_diff_colored = self.apply_colormap(diffusion_diff * 255, cv2.COLORMAP_HOT)
             
-            # Calculate difference between GAN and Diffusion
-            gan_diffusion_diff = np.abs(gan_norm - diff_norm)
+            # Create 2-row grid
+            rows = 2
+            cols = 3
+            cell_width = width // cols
+            cell_height = height // rows
             
-            # Create visualizations of the difference maps
-            # Use a different colormap (e.g., jet) for difference maps
-            gan_diff_viz = self._visualize_depth(
-                depth_map=gan_diff,
-                width=cell_width,
-                height=cell_height,
-                colormap=cv2.COLORMAP_JET
-            )
+            # Create grid
+            comparison = np.zeros((height, width, 3), dtype=np.uint8)
             
-            diffusion_diff_viz = self._visualize_depth(
-                depth_map=diffusion_diff,
-                width=cell_width,
-                height=cell_height,
-                colormap=cv2.COLORMAP_JET
-            )
+            # Apply colormap to depth maps
+            original_colored = self.apply_colormap(original_depth, colormap)
+            gan_colored = self.apply_colormap(gan_depth, colormap)
+            diffusion_colored = self.apply_colormap(diffusion_depth, colormap)
             
-            gan_diffusion_diff_viz = self._visualize_depth(
-                depth_map=gan_diffusion_diff,
-                width=cell_width,
-                height=cell_height,
-                colormap=cv2.COLORMAP_JET
-            )
+            # Resize all images
+            rgb_resized = cv2.resize(rgb_array, (cell_width, cell_height))
+            original_resized = cv2.resize(original_colored, (cell_width, cell_height))
+            gan_resized = cv2.resize(gan_colored, (cell_width, cell_height))
+            diffusion_resized = cv2.resize(diffusion_colored, (cell_width, cell_height))
+            gan_diff_resized = cv2.resize(gan_diff_colored, (cell_width, cell_height))
+            diffusion_diff_resized = cv2.resize(diffusion_diff_colored, (cell_width, cell_height))
             
-            # Place difference map visualizations in bottom row
-            output_grid[cell_height:height, 0:cell_width] = gan_diff_viz
-            output_grid[cell_height:height, cell_width:cell_width*2] = diffusion_diff_viz
-            output_grid[cell_height:height, cell_width*2:width] = gan_diffusion_diff_viz
-        
-        # Add titles
-        titles_top = ["Original", "GAN-Enhanced", "Diffusion-Enhanced"]
-        titles_bottom = ["GAN Difference", "Diffusion Difference", "GAN vs Diffusion"]
-        
-        font_size = 0.8
-        font_thickness = 2
-        
-        # Add top row titles
-        for i, title in enumerate(titles_top):
-            x_pos = cell_width * i + (cell_width // 2 - 70)  # Center the title
-            cv2.putText(
-                output_grid, 
-                title, 
-                (x_pos, 30), 
-                cv2.FONT_HERSHEY_SIMPLEX, 
-                font_size, 
-                (0, 0, 0), 
-                font_thickness
-            )
-        
-        # Add bottom row titles if showing difference maps
-        if add_difference_maps and rows > 1:
-            for i, title in enumerate(titles_bottom):
-                x_pos = cell_width * i + (cell_width // 2 - 70)  # Center the title
-                cv2.putText(
-                    output_grid, 
-                    title, 
-                    (x_pos, cell_height + 30), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 
-                    font_size, 
-                    (0, 0, 0), 
-                    font_thickness
-                )
-        
-        return output_grid
+            # Add title text to each section
+            title_height = 25
+            title_font = cv2.FONT_HERSHEY_SIMPLEX
+            title_scale = 0.7
+            title_thickness = 2
+            title_color = (255, 255, 255)
+            
+            # Add top row (RGB and depth maps)
+            comparison[0:cell_height, 0:cell_width] = rgb_resized
+            comparison[0:cell_height, cell_width:2*cell_width] = original_resized
+            comparison[0:cell_height, 2*cell_width:] = gan_resized
+            
+            # Add bottom row (diffusion depth and difference maps)
+            comparison[cell_height:, 0:cell_width] = diffusion_resized
+            comparison[cell_height:, cell_width:2*cell_width] = gan_diff_resized
+            comparison[cell_height:, 2*cell_width:] = diffusion_diff_resized
+            
+            # Add titles
+            cv2.putText(comparison, "Original RGB Image", (cell_width//2 - 120, 20), 
+                       title_font, title_scale, title_color, title_thickness)
+            cv2.putText(comparison, "Original Depth Map", (cell_width + cell_width//2 - 120, 20), 
+                       title_font, title_scale, title_color, title_thickness)
+            cv2.putText(comparison, "GAN-Enhanced Depth Map", (2*cell_width + cell_width//2 - 130, 20), 
+                       title_font, title_scale, title_color, title_thickness)
+            
+            cv2.putText(comparison, "Diffusion-Enhanced Depth Map", (cell_width//2 - 160, cell_height + 20), 
+                       title_font, title_scale, title_color, title_thickness)
+            cv2.putText(comparison, "GAN Enhancement Difference", (cell_width + cell_width//2 - 140, cell_height + 20), 
+                       title_font, title_scale, title_color, title_thickness)
+            cv2.putText(comparison, "Diffusion Enhancement Difference", (2*cell_width + cell_width//2 - 160, cell_height + 20), 
+                       title_font, title_scale, title_color, title_thickness)
+        else:
+            # Create simple 1-row grid with RGB, original depth, and enhanced depths
+            cell_width = width // 4
+            cell_height = height
+            
+            # Create grid
+            comparison = np.zeros((height, width, 3), dtype=np.uint8)
+            
+            # Apply colormap to depth maps
+            original_colored = self.apply_colormap(original_depth, colormap)
+            gan_colored = self.apply_colormap(gan_depth, colormap)
+            diffusion_colored = self.apply_colormap(diffusion_depth, colormap)
+            
+            # Resize all images
+            rgb_resized = cv2.resize(rgb_array, (cell_width, cell_height))
+            original_resized = cv2.resize(original_colored, (cell_width, cell_height))
+            gan_resized = cv2.resize(gan_colored, (cell_width, cell_height))
+            diffusion_resized = cv2.resize(diffusion_colored, (cell_width, cell_height))
+            
+            # Place images in grid
+            comparison[0:cell_height, 0:cell_width] = rgb_resized
+            comparison[0:cell_height, cell_width:2*cell_width] = original_resized
+            comparison[0:cell_height, 2*cell_width:3*cell_width] = gan_resized
+            comparison[0:cell_height, 3*cell_width:] = diffusion_resized
+            
+            # Add titles
+            title_height = 25
+            title_font = cv2.FONT_HERSHEY_SIMPLEX
+            title_scale = 0.7
+            title_thickness = 2
+            title_color = (255, 255, 255)
+            
+            cv2.putText(comparison, "Original RGB Image", (cell_width//2 - 100, 20), 
+                       title_font, title_scale, title_color, title_thickness)
+            cv2.putText(comparison, "Original Depth Map", (cell_width + cell_width//2 - 100, 20), 
+                       title_font, title_scale, title_color, title_thickness)
+            cv2.putText(comparison, "GAN-Enhanced Depth", (2*cell_width + cell_width//2 - 100, 20), 
+                       title_font, title_scale, title_color, title_thickness)
+            cv2.putText(comparison, "Diffusion-Enhanced Depth", (3*cell_width + cell_width//2 - 120, 20), 
+                       title_font, title_scale, title_color, title_thickness)
+            
+        return comparison
     
-    def save_comparison(self, 
-                       comparison_grid: np.ndarray, 
-                       filepath: str = "depth_comparison.png") -> str:
+    def save_comparison(self, comparison_grid: np.ndarray, filepath: str) -> str:
         """
-        Save a comparison grid to disk.
+        Save a comparison grid to a file.
         
         Args:
-            comparison_grid: Comparison visualization as numpy array
-            filepath: Path to save the visualization
+            comparison_grid: The comparison grid to save
+            filepath: Path to save the file to
             
         Returns:
             Path to the saved file
         """
-        # Ensure the directory exists
-        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+        # Make sure the directory exists
+        os.makedirs(os.path.dirname(os.path.abspath(filepath)) if os.path.dirname(filepath) else '.', exist_ok=True)
         
-        # Save the image
-        try:
-            cv2.imwrite(filepath, cv2.cvtColor(comparison_grid, cv2.COLOR_RGB2BGR))
-            logger.info(f"Comparison grid saved to {filepath}")
-            return filepath
-        except Exception as e:
-            logger.error(f"Error saving comparison grid: {e}")
-            return None
+        # Save the comparison grid
+        cv2.imwrite(filepath, cv2.cvtColor(comparison_grid, cv2.COLOR_RGB2BGR))
+        
+        return filepath
+
+if __name__ == "__main__":
+    # Simple test
+    from PIL import Image
+    import matplotlib.pyplot as plt
+    
+    # Load a sample image and create a synthetic depth map
+    img = Image.open("sample_image.jpg")
+    img_array = np.array(img)
+    
+    # Create a synthetic depth map (gradient from top to bottom)
+    h, w = img_array.shape[:2]
+    depth_map = np.zeros((h, w), dtype=np.uint8)
+    for i in range(h):
+        depth_map[i, :] = int(255 * (i / h))
+    
+    # Initialize comparison tool
+    comparator = DepthMapComparison()
+    
+    # Create a simple comparison grid
+    comparison = comparator.create_comparison_grid(depth_map, img)
+    
+    # Display the comparison
+    plt.figure(figsize=(15, 5))
+    plt.imshow(comparison)
+    plt.title("Depth Map Comparison")
+    plt.axis('off')
+    plt.show()
+    
+    # Save the comparison
+    comparator.save_comparison(comparison, "depth_comparison.png")
