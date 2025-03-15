@@ -10,6 +10,7 @@ import numpy as np
 
 from models.interior_reimaginer import InteriorReimaginer
 from models.reconstruction_3d import DepthReconstructor
+from models.depth_map_comparison import DepthMapComparison
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -59,8 +60,9 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
     # Available design styles from the reimaginer
     style_choices = list(reimaginer.design_styles.keys())
     
-    # Initialize the 3D reconstructor
+    # Initialize the 3D reconstructor and depth map comparison
     depth_reconstructor = DepthReconstructor()
+    depth_comparator = DepthMapComparison(depth_reconstructor)
 
     with gr.Blocks(css=css, title="Advanced Interior Reimagining AI") as ui:
         # Header
@@ -260,6 +262,51 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
                             - **Enhanced 3D Reconstruction**: Advanced point cloud with confidence-based filtering for higher quality
                             
                             The system automatically applies gradient-based confidence filtering in the Enhanced 3D Reconstruction mode for better point quality. All modes allow you to export the 3D model to use in other software.
+                            """)
+
+            # Depth Map Comparison Tab
+            with gr.TabItem("Depth Map Comparison", elem_classes="tab-content"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        depth_comp_input_image = gr.Image(type="pil", label="Original Interior")
+                        
+                        with gr.Row():
+                            depth_comp_colormap = gr.Dropdown(
+                                choices=["COLORMAP_INFERNO", "COLORMAP_JET", "COLORMAP_VIRIDIS", "COLORMAP_PLASMA", "COLORMAP_HOT"],
+                                value="COLORMAP_INFERNO",
+                                label="Depth Map Colormap"
+                            )
+                            
+                        with gr.Row():
+                            depth_comp_detailed = gr.Checkbox(
+                                label="Show Detailed Comparison (with difference maps)",
+                                value=False
+                            )
+                            
+                        depth_comp_generate_btn = gr.Button("Generate Depth Map Comparison", variant="primary")
+                        depth_comp_save_btn = gr.Button("Save Comparison Image")
+                        
+                    with gr.Column(scale=1):
+                        depth_comp_output = gr.Image(label="Depth Map Comparison")
+                        depth_comp_status = gr.Textbox(label="Status")
+                        depth_comp_download = gr.File(label="Download Comparison")
+                        
+                        # Add explanation of depth map comparison
+                        with gr.Accordion("About Depth Map Enhancement Methods", open=False):
+                            gr.Markdown("""
+                            ## Depth Map Enhancement Methods
+                            
+                            This visualization shows three versions of the depth map:
+                            
+                            - **Original**: Raw depth map produced by the depth estimation model
+                            - **GAN-Enhanced**: Depth map refined using a Generative Adversarial Network
+                            - **Diffusion-Enhanced**: Depth map processed with a diffusion model
+                            
+                            In the detailed comparison mode, the bottom row shows difference maps highlighting 
+                            where each enhancement method makes the most changes to the original depth map.
+                            
+                            GAN enhancement tends to improve edge consistency and overall geometry, while
+                            diffusion models often excel at handling complex details and textures.
                             """)
 
             # Style Explorer Tab
@@ -648,6 +695,157 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
             save_3d_model,
             inputs=[gr.State()],  # Use the stored state
             outputs=[recon_download, recon_status]
+        )
+        
+        # Depth Map Comparison functionality
+        def generate_depth_comparison(image, colormap_name, detailed_view):
+            if image is None:
+                return None, "Please upload an image first.", None
+            
+            try:
+                # Process the image to get depth map
+                try:
+                    processed = reimaginer.image_processor.process_image(image)
+                    depth_map = processed.depth_map
+                except Exception as e:
+                    # Handle errors in the process_image pipeline
+                    logger.error(f"Image processing error: {str(e)}")
+                    # Try to generate depth map directly as fallback
+                    try:
+                        # Use the depth model directly if available
+                        logger.info("Trying direct depth estimation for comparison")
+                        if hasattr(reimaginer.image_processor, 'depth_model'):
+                            # Convert PIL image to tensor
+                            import torch
+                            from torchvision import transforms
+                            img_tensor = transforms.ToTensor()(image).unsqueeze(0)
+                            
+                            # Move to correct device (CPU if CUDA failed)
+                            if "CUDA" in str(e) and torch.cuda.is_available():
+                                logger.warning("CUDA error detected, using CPU instead")
+                                device = "cpu"
+                            else:
+                                device = reimaginer.image_processor.device
+                                
+                            img_tensor = img_tensor.to(device)
+                            
+                            # Get depth prediction
+                            with torch.no_grad():
+                                depth_tensor = reimaginer.image_processor.depth_model(img_tensor)
+                                
+                            # Convert to numpy
+                            depth_map = depth_tensor.squeeze().cpu().numpy()
+                            logger.info(f"Direct depth estimation succeeded: {depth_map.shape}")
+                        else:
+                            # Create a basic depth map as fallback
+                            logger.warning("No depth model available, creating synthetic depth map")
+                            # Convert to grayscale and use as simple depth
+                            img_gray = np.array(image.convert('L'))
+                            depth_map = 255 - img_gray  # Invert: darker is further
+                    except Exception as depth_err:
+                        logger.error(f"Failed to generate depth map for comparison: {str(depth_err)}")
+                        return None, f"Failed to generate depth map: {str(depth_err)}", None
+                
+                if depth_map is None:
+                    return None, "Failed to generate depth map for comparison.", None
+                
+                # Convert colormap string to OpenCV constant
+                colormap_map = {
+                    "COLORMAP_INFERNO": cv2.COLORMAP_INFERNO,
+                    "COLORMAP_JET": cv2.COLORMAP_JET,
+                    "COLORMAP_VIRIDIS": cv2.COLORMAP_VIRIDIS,
+                    "COLORMAP_PLASMA": cv2.COLORMAP_PLASMA,
+                    "COLORMAP_HOT": cv2.COLORMAP_HOT
+                }
+                
+                colormap = colormap_map.get(colormap_name, cv2.COLORMAP_INFERNO)
+                
+                # Create state for storing data
+                state = {
+                    "depth_map": depth_map,
+                    "image": image,
+                    "colormap": colormap,
+                    "detailed": detailed_view
+                }
+                
+                # Generate the comparison visualization
+                try:
+                    if detailed_view:
+                        # Create detailed comparison with difference maps
+                        comparison_img = depth_comparator.create_detailed_comparison(
+                            original_depth=depth_map,
+                            rgb_image=image,
+                            width=1200,
+                            height=800,
+                            add_difference_maps=True,
+                            colormap=colormap
+                        )
+                    else:
+                        # Create simple row comparison
+                        comparison_img = depth_comparator.create_comparison_grid(
+                            original_depth=depth_map,
+                            rgb_image=image,
+                            width=1200,
+                            height=400,
+                            colormap=colormap
+                        )
+                        
+                    # Store the comparison image in the state
+                    state["comparison_img"] = comparison_img
+                    
+                    # Convert the comparison image to PIL for display
+                    pil_img = Image.fromarray(comparison_img)
+                    
+                    return pil_img, "Depth map comparison generated successfully.", state
+                    
+                except Exception as comp_err:
+                    logger.error(f"Error generating depth map comparison: {str(comp_err)}")
+                    return None, f"Error generating depth map comparison: {str(comp_err)}", None
+                    
+            except Exception as e:
+                logger.error(f"Error in depth map comparison: {str(e)}")
+                return None, f"Error in depth map comparison: {str(e)}", None
+        
+        def save_depth_comparison(state):
+            if state is None or "comparison_img" not in state:
+                return None, "No comparison image has been generated yet."
+            
+            try:
+                timestamp = int(time.time())
+                
+                # Generate filename based on comparison type
+                if state.get("detailed", False):
+                    filename = f"depth_comparison_detailed_{timestamp}.png"
+                else:
+                    filename = f"depth_comparison_{timestamp}.png"
+                
+                # Save the comparison image
+                filepath = depth_comparator.save_comparison(
+                    comparison_grid=state["comparison_img"],
+                    filepath=filename
+                )
+                
+                return filepath, f"Comparison image saved as {filepath}"
+                
+            except Exception as e:
+                logger.error(f"Error saving comparison image: {str(e)}")
+                return None, f"Error saving comparison image: {str(e)}"
+        
+        # Connect depth comparison buttons to functions
+        depth_comp_generate_btn.click(
+            generate_depth_comparison,
+            inputs=[depth_comp_input_image, depth_comp_colormap, depth_comp_detailed],
+            outputs=[depth_comp_output, depth_comp_status, gr.State()]  # Use gr.State() to save the data
+        ).then(
+            lambda x, y, z: z,  # Pass the state through
+            inputs=[depth_comp_output, depth_comp_status, gr.State()],
+            outputs=[gr.State()]  # Store in stateful component
+        )
+        
+        depth_comp_save_btn.click(
+            save_depth_comparison,
+            inputs=[gr.State()],  # Use the stored state
+            outputs=[depth_comp_download, depth_comp_status]
         )
 
         # Style explorer functionality
