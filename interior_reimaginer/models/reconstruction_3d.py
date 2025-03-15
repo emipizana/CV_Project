@@ -9,6 +9,7 @@ import io
 import base64
 import tempfile
 import urllib.request
+import time
 from typing import List, Dict, Tuple, Optional, Union, Any, Literal, Callable
 import torch
 import torch.nn as nn
@@ -902,25 +903,38 @@ class DepthReconstructor:
         Returns:
             Enhanced depth map as numpy array
         """
+        print("=== Starting Depth Map Enhancement with Diffusion ===")
+        logger.info("Starting depth map enhancement with lightweight diffusion model")
+        
         # Initialize the diffusion model if needed
         if not self._initialize_diffusion_model():
             logger.warning("Failed to initialize diffusion model, returning original depth map")
+            print("❌ Diffusion model initialization failed, using original depth map")
             return depth_map
         
         try:
+            # Log input stats
+            print(f"📊 Input depth map shape: {depth_map.shape}, range: [{depth_map.min():.4f}, {depth_map.max():.4f}]")
+            logger.info(f"Processing depth map with shape {depth_map.shape}")
+            
             # Convert PIL image to numpy if needed
             if isinstance(image, Image.Image):
                 rgb_array = np.array(image)
+                print(f"📸 Input image type: PIL Image, converted to array shape {rgb_array.shape}")
             else:
                 rgb_array = image
+                print(f"📸 Input image type: numpy array, shape {rgb_array.shape}")
                 
             # Resize RGB to match depth map dimensions
             if rgb_array.shape[:2] != depth_map.shape:
+                print(f"🔄 Resizing RGB image from {rgb_array.shape[:2]} to match depth map {depth_map.shape}")
                 rgb_array = cv2.resize(rgb_array, (depth_map.shape[1], depth_map.shape[0]))
                 
             # Convert to PyTorch tensors
             # Get device from model parameters
             device = next(self._diffusion_model.parameters()).device
+            print(f"🖥️ Using device: {device}")
+            logger.info(f"Running diffusion model on device: {device}")
             
             # Normalize depth map to [0, 1]
             depth_norm = depth_map.astype(np.float32)
@@ -929,6 +943,7 @@ class DepthReconstructor:
                 
             # Add batch dimension and channel dimension if needed
             if len(depth_norm.shape) == 2:
+                print(f"➕ Adding batch and channel dimensions to depth map")
                 depth_tensor = torch.from_numpy(depth_norm).unsqueeze(0).unsqueeze(0).to(device)
             else:
                 depth_tensor = torch.from_numpy(depth_norm).unsqueeze(0).to(device)
@@ -937,22 +952,34 @@ class DepthReconstructor:
             rgb_array = rgb_array.astype(np.float32) / 255.0
             rgb_tensor = torch.from_numpy(rgb_array).permute(2, 0, 1).unsqueeze(0).to(device)
             
+            print(f"🚀 Running diffusion inference with tensor shapes - Depth: {depth_tensor.shape}, RGB: {rgb_tensor.shape}")
+            start_time = time.time()
+            
             # Run inference
             with torch.no_grad():
                 # Use the forward method which handles the API compatibility
                 enhanced_depth = self._diffusion_model(depth_tensor, rgb_tensor)
                 
+            inference_time = time.time() - start_time
+            print(f"⏱️ Diffusion inference completed in {inference_time:.2f} seconds")
+            logger.info(f"Diffusion inference completed in {inference_time:.2f} seconds")
+            
             # Convert back to numpy
             enhanced_depth = enhanced_depth.squeeze().cpu().numpy()
             
             # Scale back to original range
             if depth_map.max() > 0:
                 enhanced_depth = enhanced_depth * depth_map.max()
+            
+            # Log output stats
+            print(f"📊 Output enhanced depth map shape: {enhanced_depth.shape}, range: [{enhanced_depth.min():.4f}, {enhanced_depth.max():.4f}]")
+            print("✅ Depth map enhancement complete")
                 
             return enhanced_depth
             
         except Exception as e:
             logger.error(f"Error enhancing depth with diffusion: {e}")
+            print(f"❌ Error enhancing depth with diffusion: {e}")
             return depth_map
     
     def enhanced_reconstruction(self, depth_map: np.ndarray, image: Image.Image,
