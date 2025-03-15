@@ -5,6 +5,7 @@ import time
 from PIL import Image
 import torch
 import random
+import cv2
 from typing import List, Dict
 import numpy as np
 
