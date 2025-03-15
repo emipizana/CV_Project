@@ -480,7 +480,7 @@ class DepthReconstructor:
             
             # Normalize spatial coordinates
             x = (x - w/2) / w
-            y = -(y - h/2) / h  # Invert Y axis for correct orientation
+            y = (y - h/2) / h  # Invert Y axis for correct orientation
             
             # Create scatter plot with colors
             # Use x, z, -y for correct orientation (negative y makes the model upright)
@@ -862,7 +862,7 @@ class DepthReconstructor:
             
             # Normalize spatial coordinates
             x = (x - w/2) / w
-            y = -(y - h/2) / h  # Invert Y axis for correct orientation
+            y = (y - h/2) / h  # Invert Y axis for correct orientation
             
             # Extract RGB values from the image for Plotly
             r = colors[..., 0].flatten()[valid]
