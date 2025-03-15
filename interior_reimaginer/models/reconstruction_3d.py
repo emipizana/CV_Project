@@ -16,6 +16,9 @@ import torch.nn.functional as F
 from torchvision import transforms
 import math
 
+# Import lightweight diffusion model
+from interior_reimaginer.models.lightweight_diffusion import LightweightDiffusionModel, DepthDiffusionLightweight
+
 logger = logging.getLogger(__name__)
 
 class DepthSRGAN(nn.Module):
@@ -664,7 +667,8 @@ class DepthReconstructor:
     
     def _initialize_diffusion_model(self) -> bool:
         """
-        Initialize the Diffusion model for depth map enhancement.
+        Initialize the lightweight Diffusion model for depth map enhancement.
+        Uses the MobileNetV2-based DDIM model with reduced steps for faster inference.
         Attempts to download weights if not already present.
         
         Returns:
@@ -674,55 +678,40 @@ class DepthReconstructor:
             return True
             
         try:
-            logger.info("Initializing Diffusion depth enhancement model")
+            logger.info("Initializing Lightweight Diffusion depth enhancement model")
             
             # Use CPU as a fallback for environments without GPU
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             logger.info(f"Using device: {device}")
             
-            # Create the model with fewer timesteps for faster inference
-            self._diffusion_model = DepthDiffusionModel(time_steps=100).to(device)
+            # Create the lightweight model with reduced timesteps for efficient inference
+            # Using the DepthDiffusionLightweight wrapper for API compatibility
+            self._diffusion_model = DepthDiffusionLightweight(
+                time_steps=15,  # Using 15 steps instead of 100 for faster inference
+                channels=32      # Using 32 base channels instead of 64 for lighter model
+            ).to(device)
             
-            # Check if we already have cached weights
+            # Model dir path
             model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'weights')
             os.makedirs(model_dir, exist_ok=True)
             
-            self._diffusion_weights_path = os.path.join(model_dir, 'depth_diffusion_weights.pth')
+            # Try to load the weights
+            weights_loaded = self._diffusion_model.load_weights()
             
-            # If weights don't exist, attempt to download them
-            if not os.path.exists(self._diffusion_weights_path):
-                try:
-                    logger.info("Downloading pre-trained Diffusion model weights...")
-                    # Dummy URL - in a real implementation, this would be a real URL to pretrained weights
-                    weights_url = "https://github.com/example/depth-diffusion/weights/depth_diffusion_weights.pth"
-                    
-                    # In a real implementation, this would download the actual weights
-                    # Here we'll create a dummy weights file for demonstration
-                    with open(self._diffusion_weights_path, 'wb') as f:
-                        # Create dummy weights - in a real implementation this would be downloaded
-                        dummy_state_dict = self._diffusion_model.state_dict()
-                        torch.save(dummy_state_dict, self._diffusion_weights_path)
-                        
-                    logger.info(f"Diffusion model weights downloaded to {self._diffusion_weights_path}")
-                except Exception as e:
-                    logger.error(f"Failed to download diffusion model weights: {str(e)}")
-                    return False
-            
-            # Load the weights
-            try:
-                self._diffusion_model.load_state_dict(torch.load(self._diffusion_weights_path, map_location=device))
-                logger.info("Diffusion model weights loaded successfully")
-            except Exception as e:
-                logger.error(f"Failed to load diffusion model weights: {str(e)}")
-                return False
-                
-            # Set model to evaluation mode
-            self._diffusion_model.eval()
-            self._diffusion_initialized = True
-            return True
+            if weights_loaded:
+                logger.info("Lightweight diffusion model weights loaded successfully")
+                # Set model to evaluation mode
+                self._diffusion_model.eval()
+                self._diffusion_initialized = True
+                return True
+            else:
+                logger.warning("Using model with fallback weights - performance may be degraded")
+                self._diffusion_model.eval()
+                self._diffusion_initialized = True
+                return True  # Still return True to use fallback weights
             
         except Exception as e:
-            logger.error(f"Failed to initialize diffusion model: {str(e)}")
+            logger.error(f"Failed to initialize lightweight diffusion model: {str(e)}")
             self._diffusion_model = None
             self._diffusion_initialized = False
             return False
@@ -840,6 +829,179 @@ class DepthReconstructor:
             # Fall back to depth map visualization
             return self.render_depth_map(depth_map, width=width, height=height)
     
+    def enhance_depth_with_gan(self, depth_map: np.ndarray, image: Union[Image.Image, np.ndarray]) -> np.ndarray:
+        """
+        Enhance a depth map using the GAN model.
+        
+        Args:
+            depth_map: Input depth map as numpy array
+            image: RGB image (PIL or numpy array)
+            
+        Returns:
+            Enhanced depth map as numpy array
+        """
+        # Initialize the GAN model if needed
+        if not self._initialize_gan_model():
+            logger.warning("Failed to initialize GAN model, returning original depth map")
+            return depth_map
+        
+        try:
+            # Convert PIL image to numpy if needed
+            if isinstance(image, Image.Image):
+                rgb_array = np.array(image)
+            else:
+                rgb_array = image
+                
+            # Resize RGB to match depth map dimensions
+            if rgb_array.shape[:2] != depth_map.shape:
+                rgb_array = cv2.resize(rgb_array, (depth_map.shape[1], depth_map.shape[0]))
+                
+            # Convert to PyTorch tensors
+            device = next(self._gan_model.parameters()).device
+            
+            # Normalize depth map to [0, 1]
+            depth_norm = depth_map.astype(np.float32)
+            if depth_norm.max() > 0:
+                depth_norm = depth_norm / depth_norm.max()
+                
+            # Add batch dimension and channel dimension if needed
+            if len(depth_norm.shape) == 2:
+                depth_tensor = torch.from_numpy(depth_norm).unsqueeze(0).unsqueeze(0).to(device)
+            else:
+                depth_tensor = torch.from_numpy(depth_norm).unsqueeze(0).to(device)
+                
+            # Convert RGB to tensor
+            rgb_array = rgb_array.astype(np.float32) / 255.0
+            rgb_tensor = torch.from_numpy(rgb_array).permute(2, 0, 1).unsqueeze(0).to(device)
+            
+            # Run inference
+            with torch.no_grad():
+                enhanced_depth = self._gan_model(depth_tensor, rgb_tensor)
+                
+            # Convert back to numpy
+            enhanced_depth = enhanced_depth.squeeze().cpu().numpy()
+            
+            # Scale back to original range
+            if depth_map.max() > 0:
+                enhanced_depth = enhanced_depth * depth_map.max()
+                
+            return enhanced_depth
+            
+        except Exception as e:
+            logger.error(f"Error enhancing depth with GAN: {e}")
+            return depth_map
+
+    def enhance_depth_with_diffusion(self, depth_map: np.ndarray, image: Union[Image.Image, np.ndarray]) -> np.ndarray:
+        """
+        Enhance a depth map using the lightweight diffusion model.
+        
+        Args:
+            depth_map: Input depth map as numpy array
+            image: RGB image (PIL or numpy array)
+            
+        Returns:
+            Enhanced depth map as numpy array
+        """
+        # Initialize the diffusion model if needed
+        if not self._initialize_diffusion_model():
+            logger.warning("Failed to initialize diffusion model, returning original depth map")
+            return depth_map
+        
+        try:
+            # Convert PIL image to numpy if needed
+            if isinstance(image, Image.Image):
+                rgb_array = np.array(image)
+            else:
+                rgb_array = image
+                
+            # Resize RGB to match depth map dimensions
+            if rgb_array.shape[:2] != depth_map.shape:
+                rgb_array = cv2.resize(rgb_array, (depth_map.shape[1], depth_map.shape[0]))
+                
+            # Convert to PyTorch tensors
+            # Get device from model parameters
+            device = next(self._diffusion_model.parameters()).device
+            
+            # Normalize depth map to [0, 1]
+            depth_norm = depth_map.astype(np.float32)
+            if depth_norm.max() > 0:
+                depth_norm = depth_norm / depth_norm.max()
+                
+            # Add batch dimension and channel dimension if needed
+            if len(depth_norm.shape) == 2:
+                depth_tensor = torch.from_numpy(depth_norm).unsqueeze(0).unsqueeze(0).to(device)
+            else:
+                depth_tensor = torch.from_numpy(depth_norm).unsqueeze(0).to(device)
+                
+            # Convert RGB to tensor [B, C, H, W]
+            rgb_array = rgb_array.astype(np.float32) / 255.0
+            rgb_tensor = torch.from_numpy(rgb_array).permute(2, 0, 1).unsqueeze(0).to(device)
+            
+            # Run inference
+            with torch.no_grad():
+                # Use the forward method which handles the API compatibility
+                enhanced_depth = self._diffusion_model(depth_tensor, rgb_tensor)
+                
+            # Convert back to numpy
+            enhanced_depth = enhanced_depth.squeeze().cpu().numpy()
+            
+            # Scale back to original range
+            if depth_map.max() > 0:
+                enhanced_depth = enhanced_depth * depth_map.max()
+                
+            return enhanced_depth
+            
+        except Exception as e:
+            logger.error(f"Error enhancing depth with diffusion: {e}")
+            return depth_map
+    
+    def enhanced_reconstruction(self, depth_map: np.ndarray, image: Image.Image,
+                               width: int = 800, height: int = 600,
+                               downsample_factor: int = 2) -> Tuple[np.ndarray, Optional[Any]]:
+        """
+        Generate enhanced 3D reconstruction and return both the visualization and point cloud.
+        
+        Args:
+            depth_map: Depth map as numpy array
+            image: Original color image
+            width: Desired output width
+            height: Desired output height
+            downsample_factor: Factor by which to downsample the point cloud
+            
+        Returns:
+            Tuple of (rendered visualization, point cloud object)
+        """
+        try:
+            # Use diffusion model to enhance depth map if available
+            try:
+                if self._initialize_diffusion_model():
+                    logger.info("Enhancing depth map with diffusion model")
+                    enhanced_depth = self.enhance_depth_with_diffusion(depth_map, image)
+                elif self._initialize_gan_model():
+                    logger.info("Enhancing depth map with GAN model (diffusion not available)")
+                    enhanced_depth = self.enhance_depth_with_gan(depth_map, image)
+                else:
+                    logger.info("No enhancement models available, using original depth")
+                    enhanced_depth = depth_map
+            except Exception as e:
+                logger.warning(f"Error enhancing depth map: {e}")
+                enhanced_depth = depth_map
+            
+            # TODO: Create point cloud from enhanced depth
+            # For now, just return the visualization
+            render_img = self.render_pointcloud_plotly(
+                enhanced_depth, image, width, height, downsample_factor
+            )
+            
+            # Return visualization and None for point cloud (placeholder)
+            return render_img, None
+            
+        except Exception as e:
+            logger.error(f"Error in enhanced reconstruction: {e}")
+            # Return fallback visualization and None for point cloud
+            fallback_img = self.render_depth_map(depth_map, width=width, height=height)
+            return fallback_img, None
+
     def visualize_3d(self, depth_map: np.ndarray, image: Image.Image, 
                     method: str = "depth_map", width: int = 800, height: int = 600) -> np.ndarray:
         """
