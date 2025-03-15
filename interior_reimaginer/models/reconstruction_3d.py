@@ -1552,12 +1552,58 @@ class DepthReconstructor:
             # Create an enhanced colored depth map visualization as a reliable fallback
             enhanced_depth_viz = self.render_depth_map(filtered_depth, width=width, height=height)
             
-            # Create a higher quality point cloud with confidence filtering
-            pcd = self.depth_to_pointcloud(
-                depth_map=filtered_depth,
-                image=image,
-                downsample_factor=downsample_factor
-            )
+            # Create point cloud with RGB colors from the image (matching LRM method)
+            # Get color image as RGB numpy array
+            color_img = np.array(image.convert('RGB'))
+            
+            # Ensure dimensions match
+            if color_img.shape[:2] != filtered_depth.shape[:2]:
+                color_img = cv2.resize(color_img, (filtered_depth.shape[1], filtered_depth.shape[0]))
+            
+            # Create empty point cloud
+            pcd = o3d.geometry.PointCloud()
+            
+            # Get image dimensions
+            h, w = filtered_depth.shape
+            
+            # Create local coordinates for the full image
+            img_y, img_x = np.mgrid[0:h, 0:w]
+            
+            # Only include points for non-zero depth
+            valid_depth = filtered_depth > 0
+            if not np.any(valid_depth):
+                logger.warning("No valid depth points found, falling back to colored depth map")
+                return enhanced_depth_viz, o3d.geometry.PointCloud()
+            
+            # Extract valid coordinates and depth
+            valid_x = img_x[valid_depth]
+            valid_y = img_y[valid_depth]
+            valid_z = filtered_depth[valid_depth]
+            valid_colors = color_img[valid_depth] / 255.0  # Normalize to 0-1 range
+            
+            # Compute 3D coordinates
+            focal_length = 525.0  # Approximate focal length
+            cx, cy = w / 2, h / 2  # Image center
+            
+            # Convert to normalized device coordinates
+            X = (valid_x - cx) * valid_z / focal_length
+            Y = (valid_y - cy) * valid_z / focal_length
+            Z = valid_z
+            
+            # Combine into points
+            points = np.stack((X, Y, Z), axis=1)
+            
+            # Create Open3D point cloud
+            pcd.points = o3d.utility.Vector3dVector(points)
+            pcd.colors = o3d.utility.Vector3dVector(valid_colors)
+            
+            # Optionally downsample for performance
+            if downsample_factor > 1:
+                pcd = pcd.voxel_down_sample(voxel_size=0.01 * downsample_factor)
+            
+            # Optionally filter noise and outliers
+            if len(pcd.points) > 100:  # Only if enough points
+                pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
             
             # Check if point cloud generation succeeded
             if pcd is None or len(pcd.points) == 0:
@@ -2140,12 +2186,58 @@ class DepthReconstructor:
             # Create an enhanced colored depth map visualization as a reliable fallback
             enhanced_depth_viz = self.render_depth_map(filtered_depth, width=width, height=height)
             
-            # Create a higher quality point cloud with confidence filtering
-            pcd = self.depth_to_pointcloud(
-                depth_map=filtered_depth,
-                image=image,
-                downsample_factor=downsample_factor
-            )
+            # Create point cloud with RGB colors from the image (matching LRM method)
+            # Get color image as RGB numpy array
+            color_img = np.array(image.convert('RGB'))
+            
+            # Ensure dimensions match
+            if color_img.shape[:2] != filtered_depth.shape[:2]:
+                color_img = cv2.resize(color_img, (filtered_depth.shape[1], filtered_depth.shape[0]))
+            
+            # Create empty point cloud
+            pcd = o3d.geometry.PointCloud()
+            
+            # Get image dimensions
+            h, w = filtered_depth.shape
+            
+            # Create local coordinates for the full image
+            img_y, img_x = np.mgrid[0:h, 0:w]
+            
+            # Only include points for non-zero depth
+            valid_depth = filtered_depth > 0
+            if not np.any(valid_depth):
+                logger.warning("No valid depth points found, falling back to colored depth map")
+                return enhanced_depth_viz, o3d.geometry.PointCloud()
+            
+            # Extract valid coordinates and depth
+            valid_x = img_x[valid_depth]
+            valid_y = img_y[valid_depth]
+            valid_z = filtered_depth[valid_depth]
+            valid_colors = color_img[valid_depth] / 255.0  # Normalize to 0-1 range
+            
+            # Compute 3D coordinates
+            focal_length = 525.0  # Approximate focal length
+            cx, cy = w / 2, h / 2  # Image center
+            
+            # Convert to normalized device coordinates
+            X = (valid_x - cx) * valid_z / focal_length
+            Y = (valid_y - cy) * valid_z / focal_length
+            Z = valid_z
+            
+            # Combine into points
+            points = np.stack((X, Y, Z), axis=1)
+            
+            # Create Open3D point cloud
+            pcd.points = o3d.utility.Vector3dVector(points)
+            pcd.colors = o3d.utility.Vector3dVector(valid_colors)
+            
+            # Optionally downsample for performance
+            if downsample_factor > 1:
+                pcd = pcd.voxel_down_sample(voxel_size=0.01 * downsample_factor)
+            
+            # Optionally filter noise and outliers
+            if len(pcd.points) > 100:  # Only if enough points
+                pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
             
             # Check if point cloud generation succeeded
             if pcd is None or len(pcd.points) == 0:
