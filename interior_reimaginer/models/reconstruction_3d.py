@@ -727,6 +727,119 @@ class DepthReconstructor:
             self._diffusion_initialized = False
             return False
     
+    def _render_custom_pointcloud_for_lrm(self, depth_map: np.ndarray, image: Image.Image,
+                                        width: int = 800, height: int = 600,
+                                        downsample_factor: int = 4) -> np.ndarray:
+        """
+        Special version of point cloud renderer for LRM and diffusion methods with correct orientation
+        
+        Args:
+            depth_map: Depth map as numpy array
+            image: Original color image
+            width: Desired output width
+            height: Desired output height
+            downsample_factor: Factor by which to downsample the point cloud
+            
+        Returns:
+            Rendered point cloud as numpy array
+        """
+        logger.info(f"Rendering custom point cloud for LRM/diffusion (downsample={downsample_factor})")
+        
+        try:
+            # Normalize depth map
+            if depth_map.max() <= 255:
+                depth_norm = depth_map.astype(np.float32) / 255.0
+            else:
+                depth_norm = depth_map.astype(np.float32) / 1000.0
+
+            # Get color image as RGB numpy array
+            color_img = np.array(image.convert('RGB'))
+            
+            # Ensure dimensions match
+            if color_img.shape[:2] != depth_map.shape[:2]:
+                color_img = cv2.resize(color_img, (depth_map.shape[1], depth_map.shape[0]))
+            
+            # Downsample for better performance
+            h, w = depth_norm.shape
+            y_indices, x_indices = np.mgrid[0:h:downsample_factor, 0:w:downsample_factor]
+            
+            # Get 3D coordinates
+            z = depth_norm[y_indices, x_indices]
+            x = x_indices
+            y = y_indices
+            colors = color_img[y_indices, x_indices]
+            
+            # Flatten arrays for scatter plot
+            x = x.flatten()
+            y = y.flatten()
+            z = z.flatten()
+            
+            # Filter out invalid points
+            valid = (z > 0)
+            x = x[valid]
+            y = y[valid]
+            z = z[valid]
+            
+            # Normalize spatial coordinates
+            x = (x - w/2) / w
+            y = (y - h/2) / h  # Invert Y axis for correct orientation
+            
+            # Extract RGB values from the image for Plotly
+            r = colors[..., 0].flatten()[valid]
+            g = colors[..., 1].flatten()[valid]
+            b = colors[..., 2].flatten()[valid]
+            
+            # Create color strings in 'rgb(r,g,b)' format
+            color_strs = [f'rgb({r[i]},{g[i]},{b[i]})' for i in range(len(r))]
+            
+            # Create the 3D scatter plot with optimized marker properties
+            # For LRM and diffusion we need to flip the Y coordinate to fix the upside-down issue
+            fig = go.Figure(data=[go.Scatter3d(
+                x=x,
+                y=z,  # Use z for y-axis (depth)
+                z=-y,  # Use NEGATIVE y for correct orientation for LRM/diffusion
+                mode='markers',
+                marker=dict(
+                    size=3,  # Increased from 2 to 3
+                    color=color_strs,
+                    opacity=0.9,  # Increased from 0.8 to 0.9
+                    showscale=False  # Disable color bar
+                )
+            )])
+            
+            # Set layout for better visualization
+            fig.update_layout(
+                width=width,
+                height=height,
+                scene=dict(
+                    xaxis_title='X',
+                    yaxis_title='Z (Depth)',
+                    zaxis_title='Y',
+                    aspectratio=dict(x=1, y=1, z=1),
+                    camera=dict(
+                        eye=dict(x=1.2, y=1.2, z=1.2),
+                        up=dict(x=0, y=0, z=1)
+                    ),
+                    xaxis=dict(showgrid=False, zeroline=False),
+                    yaxis=dict(showgrid=False, zeroline=False),
+                    zaxis=dict(showgrid=False, zeroline=False)
+                ),
+                margin=dict(l=0, r=0, b=0, t=0),
+                paper_bgcolor='rgb(240, 240, 240)',
+                plot_bgcolor='rgb(240, 240, 240)'
+            )
+            
+            # Render to image
+            img_bytes = fig.to_image(format="png")
+            img = np.array(Image.open(io.BytesIO(img_bytes)))
+            
+            # Convert to float32 and normalize
+            return img.astype(np.float32) / 255.0
+        except Exception as e:
+            logger.warning(f"Error rendering with Plotly: {str(e)}")
+            # Fall back to depth map visualization
+            return self.render_depth_map(depth_map, width=width, height=height)
+    
     def visualize_3d(self, depth_map: np.ndarray, image: Image.Image, 
                     method: str = "depth_map", width: int = 800, height: int = 600) -> np.ndarray:
         """
@@ -747,18 +860,15 @@ class DepthReconstructor:
         # Switch between different visualization methods
         if method == "depth_map":
             return self.render_depth_map(depth_map, width=width, height=height)
-        elif method in ["enhanced_3d", "diffusion_3d", "lrm_3d"]:
-            # For all 3D methods, use Plotly-based visualization
-            # We can add different downsampling factors for different methods
-            if method == "enhanced_3d":
-                # For enhanced 3D, use a moderate downsampling for detail
-                return self.render_pointcloud_plotly(depth_map, image, width, height, downsample_factor=2)
-            elif method == "diffusion_3d":
-                # For diffusion 3D, use a finer downsampling for more detail
-                return self.render_pointcloud_plotly(depth_map, image, width, height, downsample_factor=3)
-            else:  # lrm_3d
-                # For LRM 3D, use standard downsampling
-                return self.render_pointcloud_plotly(depth_map, image, width, height, downsample_factor=4)
+        elif method == "enhanced_3d":
+            # For enhanced 3D, use a moderate downsampling for detail
+            # For this method, the normal render_pointcloud_plotly works fine
+            return self.render_pointcloud_plotly(depth_map, image, width, height, downsample_factor=2)
+        elif method == "diffusion_3d" or method == "lrm_3d":
+            # For diffusion and LRM, use the special renderer with correct orientation
+            # These methods need the modified renderer to prevent upside-down images
+            downsample = 3 if method == "diffusion_3d" else 4
+            return self._render_custom_pointcloud_for_lrm(depth_map, image, width, height, downsample_factor=downsample)
         else:
             # Default to point cloud if method not recognized
             logger.warning(f"Unknown visualization method: {method}, falling back to 3D point cloud")
