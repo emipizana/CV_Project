@@ -661,7 +661,7 @@ class DepthReconstructor:
                     mesh = go.Mesh3d(
                         x=x_norm, 
                         y=z_flat,  # Use z for y-axis (depth)
-                        z=-y_norm,  # Negative y for correct orientation
+                        z=y_norm,  # Negative y for correct orientation #Chagned to positive 
                         i=i, j=j, k=k,
                         intensity=intensity,
                         colorscale='Viridis',
@@ -877,7 +877,7 @@ class DepthReconstructor:
             fig = go.Figure(data=[go.Scatter3d(
                 x=x,
                 y=z,  # Use z for y-axis (depth)
-                z=-y,  # Negative y for correct orientation
+                z=y,  # Negative y for correct orientation #Changed to positive y
                 mode='markers',
                 marker=dict(
                     size=3,  # Increased from 2 to 3
