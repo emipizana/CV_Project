@@ -666,7 +666,8 @@ class DepthReconstructor:
                         intensity=intensity,
                         colorscale='Viridis',
                         opacity=0.9,
-                        intensitymode='vertex'
+                        intensitymode='vertex',
+                        showscale=False  # Disable color bar
                     )
                     
                     # Create a scatter plot for points on top of the mesh for better coloring
@@ -730,7 +731,7 @@ class DepthReconstructor:
                         surfacecolor=np.sqrt(R**2 + G**2 + B**2),  # Use magnitude as color
                         colorscale='Viridis',
                         opacity=0.9,
-                        showscale=False
+                        showscale=False  # Disable color bar
                     )
                     
                     # Add points for better coloring
@@ -881,7 +882,8 @@ class DepthReconstructor:
                 marker=dict(
                     size=3,  # Increased from 2 to 3
                     color=color_strs,
-                    opacity=0.9  # Increased from 0.8 to 0.9
+                    opacity=0.9,  # Increased from 0.8 to 0.9
+                    showscale=False  # Disable color bar
                 )
             )])
             
