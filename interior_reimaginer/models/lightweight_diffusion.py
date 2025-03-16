@@ -492,26 +492,26 @@ class LightweightDiffusionModel(nn.Module):
                 except Exception as hub_error:
                     logger.warning(f"Failed to load from PyTorch Hub: {str(hub_error)}")
                     
-                    # Attempt to load DPT model weights as fallback
-                    logger.info("Attempting to load Intel/dpt-hybrid-midas-small as fallback...")
+                    # Attempt to load MiDaS model weights as fallback
+                    logger.info("Attempting to load vinvino02/midas-small as fallback...")
                     try:
-                        # Download weights from DPT model
-                        dpt_repo_id = "Intel/dpt-hybrid-midas-small"
-                        dpt_filename = "pytorch_model.bin"
+                        # Download weights from publicly accessible MiDaS model
+                        midas_repo_id = "vinvino02/midas-small"
+                        midas_filename = "pytorch_model.bin"
                         
-                        dpt_weights_path = hf_hub_download(
-                            repo_id=dpt_repo_id,
-                            filename=dpt_filename,
+                        midas_weights_path = hf_hub_download(
+                            repo_id=midas_repo_id,
+                            filename=midas_filename,
                             cache_dir=weights_dir,
                             force_download=force_reload
                         )
                         
-                        # Load DPT weights
-                        dpt_state_dict = torch.load(dpt_weights_path, map_location=self.device)
+                        # Load MiDaS weights
+                        midas_state_dict = torch.load(midas_weights_path, map_location=self.device)
                         
-                        # Adapt weights from DPT model to our architecture
-                        logger.info("Adapting DPT weights to LightweightDiffusionModel architecture...")
-                        adapted_state_dict = self._adapt_dpt_weights(dpt_state_dict)
+                        # Adapt weights from MiDaS model to our architecture
+                        logger.info("Adapting MiDaS weights to LightweightDiffusionModel architecture...")
+                        adapted_state_dict = self._adapt_dpt_weights(midas_state_dict)
                         
                         # Load adapted weights
                         self.load_state_dict(adapted_state_dict, strict=False)
@@ -519,12 +519,13 @@ class LightweightDiffusionModel(nn.Module):
                         # Save adapted weights for future use
                         torch.save(self.state_dict(), weights_path)
                         
-                        logger.info("Successfully loaded and adapted weights from Intel/dpt-hybrid-midas-small")
+                        logger.info("Successfully loaded and adapted weights from vinvino02/midas-small")
                         self.weights_loaded = True
                         return True
                         
-                    except Exception as dpt_error:
-                        logger.warning(f"Failed to load DPT model weights: {str(dpt_error)}")
+                    except Exception as midas_error:
+                        logger.warning(f"Failed to load MiDaS model weights: {str(midas_error)}")
+                        logger.warning("Error details: ", exc_info=True)
                         logger.warning("Using randomly initialized weights as fallback")
                         
                         # Save current random weights for consistent behavior
