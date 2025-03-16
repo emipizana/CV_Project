@@ -492,22 +492,25 @@ class LightweightDiffusionModel(nn.Module):
                 except Exception as hub_error:
                     logger.warning(f"Failed to load from PyTorch Hub: {str(hub_error)}")
                     
-                    # Attempt to load MiDaS model weights as fallback
-                    logger.info("Attempting to load vinvino02/midas-small as fallback...")
+                # Attempt to load MiDaS model weights as fallback using PyTorch Hub
+                    logger.info("Attempting to load MiDaS from PyTorch Hub as fallback...")
                     try:
-                        # Download weights from publicly accessible MiDaS model
-                        midas_repo_id = "vinvino02/midas-small"
-                        midas_filename = "pytorch_model.bin"
+                        # Load MiDaS small model from PyTorch Hub
+                        logger.info("Loading MiDaS_small from intel-isl/MiDaS")
+                        try:
+                            midas_model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small", pretrained=True)
+                            model_type = "small"
+                        except Exception as small_error:
+                            logger.warning(f"Failed to load MiDaS_small, trying full model: {str(small_error)}")
+                            # Try the full model as fallback
+                            midas_model = torch.hub.load("intel-isl/MiDaS", "MiDaS", pretrained=True)
+                            model_type = "full"
                         
-                        midas_weights_path = hf_hub_download(
-                            repo_id=midas_repo_id,
-                            filename=midas_filename,
-                            cache_dir=weights_dir,
-                            force_download=force_reload
-                        )
+                        logger.info(f"Successfully loaded MiDaS {model_type} model from PyTorch Hub")
                         
-                        # Load MiDaS weights
-                        midas_state_dict = torch.load(midas_weights_path, map_location=self.device)
+                        # Get state dictionary from the model
+                        midas_model = midas_model.to(self.device)
+                        midas_state_dict = midas_model.state_dict()
                         
                         # Adapt weights from MiDaS model to our architecture
                         logger.info("Adapting MiDaS weights to LightweightDiffusionModel architecture...")
@@ -519,7 +522,7 @@ class LightweightDiffusionModel(nn.Module):
                         # Save adapted weights for future use
                         torch.save(self.state_dict(), weights_path)
                         
-                        logger.info("Successfully loaded and adapted weights from vinvino02/midas-small")
+                        logger.info(f"Successfully loaded and adapted weights from MiDaS {model_type} model")
                         self.weights_loaded = True
                         return True
                         
