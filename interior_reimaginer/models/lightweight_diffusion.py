@@ -3,11 +3,8 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import timm
 import math
-import numpy as np
-from typing import Optional, Tuple, Dict, Any, Union
-from huggingface_hub import hf_hub_download
+from typing import Optional
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 logger = logging.getLogger(__name__)
@@ -129,7 +126,7 @@ class LightweightDiffusionModel(nn.Module):
     - MobileNetV2-based U-Net architecture with reduced channels
     - Efficient DDIM scheduler with 10-20 inference steps
     - Support for RGB+depth input conditioning
-    - Pretrained weights download from Hugging Face
+    - Loads and adapts weights from MiDaS small model
     - CPU-friendly inference
     
     Args:
@@ -349,7 +346,7 @@ class LightweightDiffusionModel(nn.Module):
         
         return adapted_state_dict
     
-    def forward(self, x, rgb=None, timestep=None, noise=None):
+    def forward(self, x, rgb=None, timestep=None):
         """
         Forward pass through the network.
         
@@ -357,7 +354,6 @@ class LightweightDiffusionModel(nn.Module):
             x: Input tensor (noisy depth map during training, placeholder during inference)
             rgb: RGB image tensor (optional, only used if rgb_conditioned=True)
             timestep: Current timestep in the diffusion process
-            noise: Optional noise to add to the input
             
         Returns:
             Predicted noise (during training) or denoised depth map (during inference)
@@ -416,130 +412,44 @@ class LightweightDiffusionModel(nn.Module):
     
     def load_pretrained_weights(self, force_reload=False):
         """
-        Attempt to load pretrained weights from Hugging Face Hub or local cache.
+        Load pretrained weights directly from MiDaS small model using PyTorch Hub.
         
         Args:
             force_reload: If True, force re-download even if weights are already loaded
             
         Returns:
-            True if weights were loaded successfully, False otherwise
+            True if weights were loaded successfully
         """
         if self.weights_loaded and not force_reload:
             logger.info("Pretrained weights already loaded")
             return True
+            
+        # Load MiDaS small model from PyTorch Hub
+        logger.info("Loading MiDaS_small from intel-isl/MiDaS")
+        midas_model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small", pretrained=True)
         
-        try:
-            # Define model directory
-            weights_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'weights')
-            os.makedirs(weights_dir, exist_ok=True)
-            
-            weights_path = os.path.join(weights_dir, 'lightweight_diffusion_weights.pt')
-            
-            # Try to load locally first
-            if os.path.exists(weights_path) and not force_reload:
-                logger.info(f"Loading weights from local file: {weights_path}")
-                state_dict = torch.load(weights_path, map_location=self.device)
-                self.load_state_dict(state_dict)
-                self.weights_loaded = True
-                return True
-            
-            # If not available locally or force_reload, download from Hugging Face
-            try:
-                logger.info("Downloading pretrained weights from Hugging Face Hub...")
-                
-                # Repository and filename for original weights
-                repo_id = "username/lightweight-depth-diffusion"
-                filename = "lightweight_diffusion_weights.pt"
-                
-                # Try to download weights
-                weights_path = hf_hub_download(
-                    repo_id=repo_id,
-                    filename=filename,
-                    cache_dir=weights_dir,
-                    force_download=force_reload
-                )
-                
-                # Load weights
-                state_dict = torch.load(weights_path, map_location=self.device)
-                self.load_state_dict(state_dict)
-                logger.info(f"Successfully loaded weights from {repo_id}")
-                self.weights_loaded = True
-                return True
-                
-            except Exception as e:
-                logger.warning(f"Failed to download weights from Hugging Face: {str(e)}")
-                
-                # Try to load from PyTorch Hub as fallback
-                try:
-                    logger.info("Attempting to load from PyTorch Hub as fallback...")
-                    # Replace with actual repo and model
-                    torch_hub_model = torch.hub.load(
-                        'username/repo:main',
-                        'lightweight_diffusion',
-                        pretrained=True
-                    )
-                    
-                    # Copy weights from Hub model
-                    self.load_state_dict(torch_hub_model.state_dict())
-                    
-                    # Save to local path for future use
-                    torch.save(self.state_dict(), weights_path)
-                    
-                    logger.info("Successfully loaded weights from PyTorch Hub")
-                    self.weights_loaded = True
-                    return True
-                    
-                except Exception as hub_error:
-                    logger.warning(f"Failed to load from PyTorch Hub: {str(hub_error)}")
-                    
-                # Attempt to load MiDaS model weights as fallback using PyTorch Hub
-                    logger.info("Attempting to load MiDaS from PyTorch Hub as fallback...")
-                    try:
-                        # Load MiDaS small model from PyTorch Hub
-                        logger.info("Loading MiDaS_small from intel-isl/MiDaS")
-                        try:
-                            midas_model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small", pretrained=True)
-                            model_type = "small"
-                        except Exception as small_error:
-                            logger.warning(f"Failed to load MiDaS_small, trying full model: {str(small_error)}")
-                            # Try the full model as fallback
-                            midas_model = torch.hub.load("intel-isl/MiDaS", "MiDaS", pretrained=True)
-                            model_type = "full"
-                        
-                        logger.info(f"Successfully loaded MiDaS {model_type} model from PyTorch Hub")
-                        
-                        # Get state dictionary from the model
-                        midas_model = midas_model.to(self.device)
-                        midas_state_dict = midas_model.state_dict()
-                        
-                        # Adapt weights from MiDaS model to our architecture
-                        logger.info("Adapting MiDaS weights to LightweightDiffusionModel architecture...")
-                        adapted_state_dict = self._adapt_dpt_weights(midas_state_dict)
-                        
-                        # Load adapted weights
-                        self.load_state_dict(adapted_state_dict, strict=False)
-                        
-                        # Save adapted weights for future use
-                        torch.save(self.state_dict(), weights_path)
-                        
-                        logger.info(f"Successfully loaded and adapted weights from MiDaS {model_type} model")
-                        self.weights_loaded = True
-                        return True
-                        
-                    except Exception as midas_error:
-                        logger.warning(f"Failed to load MiDaS model weights: {str(midas_error)}")
-                        logger.warning("Error details: ", exc_info=True)
-                        logger.warning("Using randomly initialized weights as fallback")
-                        
-                        # Save current random weights for consistent behavior
-                        torch.save(self.state_dict(), weights_path)
-                        self.weights_loaded = True
-                        
-                        return False
+        # Get state dictionary from the model
+        midas_model = midas_model.to(self.device)
+        midas_state_dict = midas_model.state_dict()
         
-        except Exception as e:
-            logger.error(f"Error loading pretrained weights: {str(e)}")
-            return False
+        # Adapt weights from MiDaS model to our architecture
+        logger.info("Adapting MiDaS weights to LightweightDiffusionModel architecture...")
+        adapted_state_dict = self._adapt_dpt_weights(midas_state_dict)
+        
+        # Load adapted weights
+        self.load_state_dict(adapted_state_dict, strict=False)
+        
+        # Define weights path for saving
+        weights_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'weights')
+        os.makedirs(weights_dir, exist_ok=True)
+        weights_path = os.path.join(weights_dir, 'lightweight_diffusion_weights.pt')
+        
+        # Save adapted weights for future use
+        torch.save(self.state_dict(), weights_path)
+        
+        logger.info("Successfully loaded and adapted weights from MiDaS small model")
+        self.weights_loaded = True
+        return True
     
     @torch.no_grad()
     def enhance_depth(self, depth_map, rgb_image=None, num_inference_steps=None):

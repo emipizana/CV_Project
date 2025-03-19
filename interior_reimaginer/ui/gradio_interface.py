@@ -144,64 +144,6 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
                             selected_image = gr.Image(type="pil", visible=False)
                             select_output_btn = gr.Button("Use Selected Design")
 
-            # Targeted Redesign Tab
-            with gr.TabItem("Targeted Redesign", elem_classes="tab-content"):
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        target_input_image = gr.Image(type="pil", label="Original Interior")
-                        target_analyze_btn = gr.Button("Analyze Room Elements")
-
-                        with gr.Row():
-                            target_area = gr.Dropdown(
-                                choices=["walls", "floor", "ceiling", "furniture", "sofa", "chairs", "lighting"],
-                                label="Target Area"
-                            )
-                            target_style = gr.Textbox(
-                                label="Design Instructions for Target Area",
-                                placeholder="e.g., 'Modern wooden floor'"
-                            )
-
-                        target_generate_btn = gr.Button("Reimagine Target Area", variant="primary")
-
-                    with gr.Column(scale=1):
-                        target_elements = gr.JSON(label="Detected Room Elements")
-                        target_output_gallery = gr.Gallery(
-                            label="Redesigned Area Variations",
-                            show_label=True,
-                            columns=2,
-                            height="auto",
-                            elem_classes="gallery-container"
-                        )
-
-            # Material Explorer Tab
-            with gr.TabItem("Material Explorer", elem_classes="tab-content"):
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        material_input_image = gr.Image(type="pil", label="Original Interior")
-
-                        with gr.Row():
-                            material_area = gr.Dropdown(
-                                choices=["walls", "floor", "ceiling"],
-                                label="Surface Area"
-                            )
-
-                        with gr.Row():
-                            material_options = gr.CheckboxGroup(
-                                choices=["wood", "marble", "concrete", "tile", "wallpaper", "brick", "painted"],
-                                label="Material Options"
-                            )
-
-                        material_generate_btn = gr.Button("Compare Materials", variant="primary")
-
-                    with gr.Column(scale=1):
-                        material_output_gallery = gr.Gallery(
-                            label="Material Comparison",
-                            show_label=True,
-                            columns=3,
-                            height="auto",
-                            elem_classes="gallery-container"
-                        )
-
             # 3D Reconstruction Tab
             with gr.TabItem("3D Reconstruction", elem_classes="tab-content"):
                 with gr.Row():
@@ -310,23 +252,6 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
                             diffusion models often excel at handling complex details and textures.
                             """)
 
-            # Style Explorer Tab
-            with gr.TabItem("Style Explorer", elem_classes="tab-content"):
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        style_input_image = gr.Image(type="pil", label="Original Interior")
-
-                        with gr.Row():
-                            style_options = gr.CheckboxGroup(
-                                choices=style_choices,
-                                label="Styles to Explore"
-                            )
-
-                        style_generate_btn = gr.Button("Compare Styles", variant="primary")
-
-                    with gr.Column(scale=1):
-                        style_output = gr.HTML(label="Style Variations")
-
         # Functionality for Full Room Redesign tab
         def update_prompt(style):
             if style == "custom":
@@ -393,86 +318,6 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
             outputs=[output_gallery]
         )
 
-        # Targeted redesign functionality
-        def analyze_room_elements(image):
-            if image is None:
-                return None
-
-            try:
-                # Process the image
-                processed = reimaginer.image_processor.process_image(image)
-
-                # Return detected elements
-                elements = {
-                    "detected_objects": list(processed.object_masks.keys()),
-                    "room_type": processed.room_analysis.get("style", "Unknown"),
-                    "dominant_colors": processed.room_analysis.get("colors", "Unknown"),
-                    "materials": processed.room_analysis.get("materials", "Unknown")
-                }
-
-                return elements
-            except Exception as e:
-                logger.error(f"Error analyzing room elements: {e}")
-                return {"error": str(e)}
-
-        target_analyze_btn.click(analyze_room_elements, inputs=[target_input_image], outputs=[target_elements])
-
-        def reimagine_target(image, target_area, style_prompt):
-            if image is None or not target_area:
-                return None
-
-            try:
-                # Process the image
-                processed = reimaginer.image_processor.process_image(image)
-
-                # Generate targeted redesigns
-                images = reimaginer.reimagine_targeted(
-                    processed_image=processed,
-                    target_area=target_area,
-                    style_prompt=style_prompt,
-                    num_images=4
-                )
-
-                return images
-            except Exception as e:
-                logger.error(f"Error in targeted reimagining: {e}")
-                return None
-
-        target_generate_btn.click(
-            reimagine_target,
-            inputs=[target_input_image, target_area, target_style],
-            outputs=[target_output_gallery]
-        )
-
-        # Material explorer functionality
-        def compare_materials(image, area, materials):
-            if image is None or not area or not materials:
-                return None
-
-            try:
-                # Process the image
-                processed = reimaginer.image_processor.process_image(image)
-
-                # Compare materials
-                results = reimaginer.compare_materials(
-                    processed_image=processed,
-                    target_area=area,
-                    material_options=materials
-                )
-
-                # Convert dictionary to list for gallery
-                result_images = list(results.values())
-
-                return result_images
-            except Exception as e:
-                logger.error(f"Error comparing materials: {e}")
-                return None
-
-        material_generate_btn.click(
-            compare_materials,
-            inputs=[material_input_image, material_area, material_options],
-            outputs=[material_output_gallery]
-        )
         
         # 3D Reconstruction functionality
         def generate_3d_visualization(image, downsample, viz_method, auto_fallback):
@@ -849,69 +694,6 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
             outputs=[depth_comp_download, depth_comp_status]
         )
 
-        # Style explorer functionality
-        def compare_styles(image, styles):
-            if image is None or not styles:
-                return """<div class="error">Please select at least one style to explore.</div>"""
-
-            try:
-                # Generate prompts from selected styles
-                style_prompts = []
-                for style_name in styles:
-                    style = reimaginer.design_styles.get(style_name)
-                    if style:
-                        prompt = f"{style.name} style interior"
-                        style_prompts.append(prompt)
-
-                # Generate variations for each style
-                results = reimaginer.create_batch_variations(
-                    original_image=image,
-                    style_prompts=style_prompts,
-                    style_strength=0.75
-                )
-
-                # Create HTML output with style comparisons
-                html = """<div class="style-comparison">"""
-
-                for prompt, images in results.items():
-                    if not images:
-                        continue
-
-                    html += f"""
-                    <div class="style-section">
-                        <h3>{prompt}</h3>
-                        <div class="style-images">
-                    """
-
-                    for i, img in enumerate(images):
-                        # Save image temporarily and get path
-                        img_path = f"temp_{prompt.replace(' ', '_')}_{i}.jpg"
-                        img.save(img_path)
-
-                        html += f"""
-                        <div class="style-image">
-                            <img src="{img_path}" alt="{prompt} variation {i+1}">
-                            <p>Variation {i+1}</p>
-                        </div>
-                        """
-
-                    html += """
-                        </div>
-                    </div>
-                    """
-
-                html += """</div>"""
-
-                return html
-            except Exception as e:
-                logger.error(f"Error comparing styles: {e}")
-                return f"""<div class="error">Error: {str(e)}</div>"""
-
-        style_generate_btn.click(
-            compare_styles,
-            inputs=[style_input_image, style_options],
-            outputs=[style_output]
-        )
 
         # Footer
         with gr.Row(elem_classes="footer"):
@@ -919,9 +701,9 @@ def create_advanced_ui(reimaginer: InteriorReimaginer) -> gr.Blocks:
             ## Tips for Best Results
             - Use well-lit, clear photos of your space
             - Be specific with style descriptions
-            - Combine the full room redesign with targeted changes for best results
-            - Use the Material Explorer to experiment with different surfaces
-            - Save your favorite designs and iterate on them
+            - Explore different design options by adjusting style parameters
+            - Try different visualization methods in the 3D Reconstruction tab
+            - Save your favorite designs and depth maps
 
             Advanced Interior Reimagining AI - Powered by Stable Diffusion, ControlNet, and 3D Reconstruction
             """)
