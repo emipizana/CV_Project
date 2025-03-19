@@ -40,18 +40,18 @@ CV_Project/
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/your-username/CV_Project.git
-cd CV_Project
+!git clone https://github.com/emipizana/CV_Project.git
+%cd CV_Project
 ```
 
 2. Install dependencies:
 ```bash
-pip install -r interior_reimaginer/requirements.txt
+!pip install -r interior_reimaginer/requirements.txt
 ```
 3. Run the Gradio interface:
 
 ```bash
-python interior_reimaginer/main.py
+!python interior_reimaginer/main.py
 ```
 
 This will start the application and generate both a local URL and a public shareable link that you can use to access the interface from other devices. The shareable link will be displayed in the console.
