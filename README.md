@@ -81,49 +81,6 @@ To run Interior Reimaginer on Google Colab with optimal performance:
    - Install all required dependencies
    - Set up the environment for optimal performance
 
-If you prefer to set up manually:
-
-```python
-# Clone the repository
-!git clone https://github.com/your-username/CV_Project.git
-%cd CV_Project
-
-# Install dependencies
-!pip install -r interior_reimaginer/requirements.txt
-
-# Install Open3D for 3D reconstruction
-!pip install open3d
-
-# Import required modules
-from interior_reimaginer.models.interior_reimaginer import InteriorReimaginer
-from interior_reimaginer.models.reconstruction_3d import DepthReconstructor
-from PIL import Image
-import numpy as np
-
-# Check GPU availability (recommended: A100)
-import torch
-print(f"GPU available: {torch.cuda.is_available()}")
-print(f"GPU device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None'}")
-```
-
-## Usage
-
-### Local Usage
-
-Run the Gradio interface:
-
-```bash
-python interior_reimaginer/main.py
-```
-
-This will start the application and generate both a local URL (http://127.0.0.1:7860) and a public shareable link that you can use to access the interface from other devices. The shareable link will be displayed in the console.
-
-If you don't want to create a public link, use:
-
-```bash
-python interior_reimaginer/main.py --share=False
-```
-
 To run Interior Reimaginer on Google Colab with optimal performance:
 
 > **IMPORTANT**: An A100 GPU or equivalent is recommended for optimal performance. The diffusion model and 3D reconstruction processes are computationally intensive and will perform significantly better on high-end GPUs.
