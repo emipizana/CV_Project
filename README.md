@@ -38,8 +38,6 @@ CV_Project/
 
 ## Installation
 
-### Local Installation
-
 1. Clone the repository:
 ```bash
 git clone https://github.com/your-username/CV_Project.git
@@ -64,26 +62,7 @@ If you don't want to create a public link, use:
 python interior_reimaginer/main.py --share=False
 ```
 
-### Google Colab Setup
-
 To run Interior Reimaginer on Google Colab with optimal performance:
-
-> **IMPORTANT**: An A100 GPU or equivalent is recommended for optimal performance. The diffusion model and 3D reconstruction processes are computationally intensive and will perform significantly better on high-end GPUs.
-
-1. Open our provided example notebook in Colab: [interior_reimaginer/examples/colab_3d_reconstruction.ipynb](https://colab.research.google.com/github/your-username/CV_Project/blob/main/interior_reimaginer/examples/colab_3d_reconstruction.ipynb)
-
-2. Before running the notebook, select **Runtime > Change runtime type** and choose:
-   - **GPU** for Hardware Accelerator
-   - **High-RAM** for Runtime shape (if available)
-
-3. The notebook will automatically:
-   - Clone the repository
-   - Install all required dependencies
-   - Set up the environment for optimal performance
-
-To run Interior Reimaginer on Google Colab with optimal performance:
-
-> **IMPORTANT**: An A100 GPU or equivalent is recommended for optimal performance. The diffusion model and 3D reconstruction processes are computationally intensive and will perform significantly better on high-end GPUs.
 
 ## Image Reimagining
 
@@ -95,7 +74,6 @@ The Image Reimagining module allows users to transform the style of their interi
 -   **Targeted Reimagining:** Modify specific parts of the room (e.g., walls, floor, furniture) using inpainting. The system automatically detects and masks common objects, or generates masks on-the-fly using CLIP segmentation for custom targets.
 -   **Style Prompting:** Users can specify a target style using free-form text, or choose from predefined design styles.
 -   **Batch Variations:** Generate multiple design variations with different style prompts.
--   **Material Comparison:** Compare different materials for a specific area of the interior.
 
 The system uses the `diffusers` library and includes optimizations for memory usage and performance, such as attention slicing and xformers (when available).
 
@@ -115,9 +93,7 @@ Adjust the `downsample_factor` to control quality vs. speed:
 The system has been optimized to streamline the weight loading process:
 
 1. First checks for cached weights to avoid redundant downloads
-2. If no cached weights exist, loads from MiDaS small model via PyTorch Hub
 3. Adapts weights to the lightweight architecture
-4. Saves the adapted weights for future use
 
 This optimization eliminates unnecessary network requests and failure paths, making the system more reliable and efficient, especially in environments with limited connectivity.
 
@@ -142,7 +118,6 @@ This optimization eliminates unnecessary network requests and failure paths, mak
 The latest version includes several performance optimizations:
 
 1. **Streamlined Weight Loading**: Direct loading of MiDaS small model weights with caching
-2. **Removed GAN-based Enhancement**: Simplified to use only the diffusion-based method that provides better results
 3. **UI Simplification**: Removed depth map comparison tab to streamline the interface
 4. **Reduced Memory Usage**: Optimized model initialization and memory management
 
