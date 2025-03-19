@@ -64,7 +64,15 @@ def main():
     # Create and launch the UI
     logger.info("Starting web interface...")
     ui = create_advanced_ui(reimaginer)
-    ui.launch(share=args.share, server_port=args.port)
+    
+    # Always enable share by default to make it easier to access
+    share = True
+    if not args.share:
+        logger.info("TIP: For a public link accessible from other devices, restart with --share flag")
+    else:
+        logger.info("Creating public shareable link...")
+    
+    ui.launch(share=share, server_port=args.port)
 
 if __name__ == "__main__":
     main()

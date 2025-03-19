@@ -2,6 +2,8 @@
 from .image_processor import ImageProcessor, ProcessedImage, RoomSegmentClass
 from .interior_reimaginer import InteriorReimaginer
 from .design_styles import DesignStyle, load_design_styles
+from .reconstruction_3d import DepthReconstructor
+from .lightweight_diffusion import LightweightDiffusionModel, DepthDiffusionLightweight
 
 __all__ = [
     'ImageProcessor', 
@@ -9,7 +11,10 @@ __all__ = [
     'RoomSegmentClass', 
     'InteriorReimaginer', 
     'DesignStyle', 
-    'load_design_styles'
+    'load_design_styles',
+    'DepthReconstructor',
+    'LightweightDiffusionModel',
+    'DepthDiffusionLightweight'
 ]
 
 # ui/__init__.py
