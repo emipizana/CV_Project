@@ -22,45 +22,6 @@ from .lightweight_diffusion import LightweightDiffusionModel, DepthDiffusionLigh
 
 logger = logging.getLogger(__name__)
 
-class DepthSRGAN(nn.Module):
-    """
-    GAN-based model for depth map enhancement and refinement
-    Implements a simplified version of DepthSRGAN architecture for depth map super-resolution
-    and filling in missing depth information.
-    """
-    def __init__(self):
-        super(DepthSRGAN, self).__init__()
-        
-        # Generator network
-        self.generator = nn.Sequential(
-            # Initial convolution
-            nn.Conv2d(4, 64, kernel_size=3, padding=1),  # 4 channels: 1 for depth, 3 for RGB
-            nn.LeakyReLU(0.2, inplace=True),
-            
-            # Feature extraction blocks
-            self._make_dense_block(64, 64),
-            self._make_dense_block(64, 64),
-            self._make_dense_block(64, 64),
-            
-            # Output convolution
-            nn.Conv2d(64, 1, kernel_size=3, padding=1)
-        )
-        
-    def _make_dense_block(self, in_channels, out_channels):
-        return nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.LeakyReLU(0.2, inplace=True)
-        )
-        
-    def forward(self, depth_map, rgb_image):
-        # Concatenate depth map and RGB image along channel dimension
-        x = torch.cat([depth_map, rgb_image], dim=1)
-        return self.generator(x)
-
 
 class DepthDiffusionModel(nn.Module):
     """
@@ -334,11 +295,6 @@ class DepthReconstructor:
         """Initialize the 3D reconstruction module"""
         logger.info("Initializing 3D Reconstructor")
         
-        # Initialize the GAN model as None until needed
-        self._gan_model = None
-        self._gan_initialized = False
-        self._gan_weights_path = None
-        
         # Initialize the Diffusion model as None until needed
         self._diffusion_model = None
         self._diffusion_initialized = False
@@ -347,7 +303,6 @@ class DepthReconstructor:
         # Define all available visualization methods
         self.visualization_methods = {
             "depth_map": "Colored Depth Map (2D)",
-            "enhanced_3d": "Enhanced 3D Reconstruction with GAN Refinement",
             "diffusion_3d": "Enhanced 3D Reconstruction with Diffusion Refinement",
             "lrm_3d": "LRM 3D Reconstruction"
         }
@@ -601,70 +556,6 @@ class DepthReconstructor:
         
         return confidence
     
-    def _initialize_gan_model(self) -> bool:
-        """
-        Initialize the GAN model for depth map enhancement.
-        Attempts to download weights if not already present.
-        
-        Returns:
-            True if initialization was successful, False otherwise
-        """
-        if self._gan_initialized:
-            return True
-            
-        try:
-            logger.info("Initializing GAN depth enhancement model")
-            
-            # Use CPU as a fallback for environments without GPU
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            logger.info(f"Using device: {device}")
-            
-            # Create the model
-            self._gan_model = DepthSRGAN().to(device)
-            
-            # Check if we already have cached weights
-            model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'weights')
-            os.makedirs(model_dir, exist_ok=True)
-            
-            self._gan_weights_path = os.path.join(model_dir, 'depth_srgan_weights.pth')
-            
-            # If weights don't exist, attempt to download them
-            if not os.path.exists(self._gan_weights_path):
-                try:
-                    logger.info("Downloading pre-trained GAN model weights...")
-                    # Dummy URL - in a real implementation, this would be a real URL to pretrained weights
-                    weights_url = "https://github.com/example/depth-srgan/weights/depth_srgan_weights.pth"
-                    
-                    # In a real implementation, this would download the actual weights
-                    # Here we'll create a dummy weights file for demonstration
-                    with open(self._gan_weights_path, 'wb') as f:
-                        # Create dummy weights - in a real implementation this would be downloaded
-                        dummy_state_dict = self._gan_model.state_dict()
-                        torch.save(dummy_state_dict, self._gan_weights_path)
-                        
-                    logger.info(f"Model weights downloaded to {self._gan_weights_path}")
-                except Exception as e:
-                    logger.error(f"Failed to download model weights: {str(e)}")
-                    return False
-            
-            # Load the weights
-            try:
-                self._gan_model.load_state_dict(torch.load(self._gan_weights_path, map_location=device))
-                logger.info("GAN model weights loaded successfully")
-            except Exception as e:
-                logger.error(f"Failed to load model weights: {str(e)}")
-                return False
-                
-            # Set model to evaluation mode
-            self._gan_model.eval()
-            self._gan_initialized = True
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize GAN model: {str(e)}")
-            self._gan_model = None
-            self._gan_initialized = False
-            return False
     
     def _initialize_diffusion_model(self) -> bool:
         """
@@ -830,67 +721,6 @@ class DepthReconstructor:
             # Fall back to depth map visualization
             return self.render_depth_map(depth_map, width=width, height=height)
     
-    def enhance_depth_with_gan(self, depth_map: np.ndarray, image: Union[Image.Image, np.ndarray]) -> np.ndarray:
-        """
-        Enhance a depth map using the GAN model.
-        
-        Args:
-            depth_map: Input depth map as numpy array
-            image: RGB image (PIL or numpy array)
-            
-        Returns:
-            Enhanced depth map as numpy array
-        """
-        # Initialize the GAN model if needed
-        if not self._initialize_gan_model():
-            logger.warning("Failed to initialize GAN model, returning original depth map")
-            return depth_map
-        
-        try:
-            # Convert PIL image to numpy if needed
-            if isinstance(image, Image.Image):
-                rgb_array = np.array(image)
-            else:
-                rgb_array = image
-                
-            # Resize RGB to match depth map dimensions
-            if rgb_array.shape[:2] != depth_map.shape:
-                rgb_array = cv2.resize(rgb_array, (depth_map.shape[1], depth_map.shape[0]))
-                
-            # Convert to PyTorch tensors
-            device = next(self._gan_model.parameters()).device
-            
-            # Normalize depth map to [0, 1]
-            depth_norm = depth_map.astype(np.float32)
-            if depth_norm.max() > 0:
-                depth_norm = depth_norm / depth_norm.max()
-                
-            # Add batch dimension and channel dimension if needed
-            if len(depth_norm.shape) == 2:
-                depth_tensor = torch.from_numpy(depth_norm).unsqueeze(0).unsqueeze(0).to(device)
-            else:
-                depth_tensor = torch.from_numpy(depth_norm).unsqueeze(0).to(device)
-                
-            # Convert RGB to tensor
-            rgb_array = rgb_array.astype(np.float32) / 255.0
-            rgb_tensor = torch.from_numpy(rgb_array).permute(2, 0, 1).unsqueeze(0).to(device)
-            
-            # Run inference
-            with torch.no_grad():
-                enhanced_depth = self._gan_model(depth_tensor, rgb_tensor)
-                
-            # Convert back to numpy
-            enhanced_depth = enhanced_depth.squeeze().cpu().numpy()
-            
-            # Scale back to original range
-            if depth_map.max() > 0:
-                enhanced_depth = enhanced_depth * depth_map.max()
-                
-            return enhanced_depth
-            
-        except Exception as e:
-            logger.error(f"Error enhancing depth with GAN: {e}")
-            return depth_map
 
     def enhance_depth_with_diffusion(self, depth_map: np.ndarray, image: Union[Image.Image, np.ndarray]) -> np.ndarray:
         """
@@ -1004,9 +834,6 @@ class DepthReconstructor:
                 if self._initialize_diffusion_model():
                     logger.info("Enhancing depth map with diffusion model")
                     enhanced_depth = self.enhance_depth_with_diffusion(depth_map, image)
-                elif self._initialize_gan_model():
-                    logger.info("Enhancing depth map with GAN model (diffusion not available)")
-                    enhanced_depth = self.enhance_depth_with_gan(depth_map, image)
                 else:
                     logger.info("No enhancement models available, using original depth")
                     enhanced_depth = depth_map

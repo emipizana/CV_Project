@@ -413,6 +413,7 @@ class LightweightDiffusionModel(nn.Module):
     def load_pretrained_weights(self, force_reload=False):
         """
         Load pretrained weights directly from MiDaS small model using PyTorch Hub.
+        This is a streamlined version that skips directly to loading from the MiDaS model.
         
         Args:
             force_reload: If True, force re-download even if weights are already loaded
@@ -420,16 +421,32 @@ class LightweightDiffusionModel(nn.Module):
         Returns:
             True if weights were loaded successfully
         """
+        # Check if weights are already loaded and we don't need to force reload
         if self.weights_loaded and not force_reload:
             logger.info("Pretrained weights already loaded")
             return True
-            
-        # Load MiDaS small model from PyTorch Hub
+        
+        # Define weights path for potential cached weights
+        weights_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'weights')
+        os.makedirs(weights_dir, exist_ok=True)
+        weights_path = os.path.join(weights_dir, 'lightweight_diffusion_weights.pt')
+        
+        # Check if we have cached adapted weights
+        if os.path.exists(weights_path) and not force_reload:
+            try:
+                logger.info(f"Loading cached adapted weights from {weights_path}")
+                self.load_state_dict(torch.load(weights_path, map_location=self.device))
+                self.weights_loaded = True
+                return True
+            except Exception as e:
+                logger.warning(f"Could not load cached weights: {e}. Will download from source.")
+        
+        # Load MiDaS small model directly from PyTorch Hub
         logger.info("Loading MiDaS_small from intel-isl/MiDaS")
         midas_model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small", pretrained=True)
+        midas_model = midas_model.to(self.device)
         
         # Get state dictionary from the model
-        midas_model = midas_model.to(self.device)
         midas_state_dict = midas_model.state_dict()
         
         # Adapt weights from MiDaS model to our architecture
@@ -439,13 +456,9 @@ class LightweightDiffusionModel(nn.Module):
         # Load adapted weights
         self.load_state_dict(adapted_state_dict, strict=False)
         
-        # Define weights path for saving
-        weights_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'weights')
-        os.makedirs(weights_dir, exist_ok=True)
-        weights_path = os.path.join(weights_dir, 'lightweight_diffusion_weights.pt')
-        
         # Save adapted weights for future use
         torch.save(self.state_dict(), weights_path)
+        logger.info(f"Saved adapted weights to {weights_path} for future use")
         
         logger.info("Successfully loaded and adapted weights from MiDaS small model")
         self.weights_loaded = True
