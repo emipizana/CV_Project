@@ -24,6 +24,19 @@ cd CV_Project
 ```bash
 pip install -r interior_reimaginer/requirements.txt
 ```
+3. Run the Gradio interface:
+
+```bash
+python interior_reimaginer/main.py
+```
+
+This will start the application and generate both a local URL (http://127.0.0.1:7860) and a public shareable link that you can use to access the interface from other devices. The shareable link will be displayed in the console.
+
+If you don't want to create a public link, use:
+
+```bash
+python interior_reimaginer/main.py --share=False
+```
 
 ### Google Colab Setup
 
@@ -65,24 +78,6 @@ import numpy as np
 import torch
 print(f"GPU available: {torch.cuda.is_available()}")
 print(f"GPU device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None'}")
-```
-
-## Usage
-
-### Local Usage
-
-Run the Gradio interface:
-
-```bash
-python interior_reimaginer/main.py
-```
-
-This will start the application and generate both a local URL (http://127.0.0.1:7860) and a public shareable link that you can use to access the interface from other devices. The shareable link will be displayed in the console.
-
-If you don't want to create a public link, use:
-
-```bash
-python interior_reimaginer/main.py --share=False
 ```
 
 ### Google Colab Usage
